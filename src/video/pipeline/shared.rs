@@ -159,6 +159,24 @@ const OUTPUT_BACKPRESSURE_GRACE_NS: u64 = 10_000_000;
 fn sustained_output_backpressure(started_ns: u64, now_ns: u64) -> bool {
     started_ns != 0 && now_ns.saturating_sub(started_ns - 1) >= OUTPUT_BACKPRESSURE_GRACE_NS
 }
+
+fn frame_due(now: Instant, next: &mut Option<Instant>, interval: Duration) -> bool {
+    if let Some(deadline) = *next {
+        if now < deadline {
+            return false;
+        }
+        let following = deadline + interval;
+        *next = Some(if following <= now {
+            now + interval
+        } else {
+            following
+        });
+    } else {
+        *next = Some(now + interval);
+    }
+    true
+}
+
 type VideoFrameMailbox = FrameMailbox<Arc<VideoFrame>>;
 
 fn spawn_video_worker(
@@ -375,11 +393,11 @@ impl Default for SharedVideoPipelineConfig {
 }
 
 impl SharedVideoPipelineConfig {
-    /// Keep encoder timing aligned with the negotiated HDMI source on every open.
+    /// Use the source rate when it is lower than the requested output rate.
     fn align_source_fps(&mut self, source_fps: Option<f64>) {
         if self.control_mode == VideoControlMode::SourceFollowing {
             if let Some(fps) = source_fps {
-                self.fps = fps.round().clamp(1.0, 120.0) as u32;
+                self.fps = self.fps.min(fps.round().clamp(1.0, 120.0) as u32);
             }
         }
     }
@@ -1407,6 +1425,8 @@ impl SharedVideoPipeline {
 
                 let mut no_subscribers_since: Option<Instant> = None;
                 let mut capture_sequence = 0u64;
+                let frame_interval = Duration::from_secs_f64(1.0 / config.fps.max(1) as f64);
+                let mut next_output_frame: Option<Instant> = None;
                 let grace_period = Duration::from_secs(AUTO_STOP_GRACE_PERIOD_SECS);
                 let mut consecutive_timeouts: u32 = 0;
                 let recovery_policy = CaptureRecoveryPolicy::new(config.control_mode);
@@ -1705,6 +1725,14 @@ impl SharedVideoPipeline {
                             stride,
                             capture_sequence,
                         ));
+                    }
+
+                    // Source-following HDMI capture can deliver 60 frames/s even when
+                    // the requested output is 30. Discard excess frames before
+                    // decoding or encoding so the mailbox stays close to live input.
+                    if !frame_due(Instant::now(), &mut next_output_frame, frame_interval) {
+                        buffer_pool.put(owned);
+                        continue;
                     }
 
                     if parallel_mjpeg_decode
@@ -2269,6 +2297,20 @@ mod tests {
     use super::*;
     use crate::video::codec::BitratePreset;
 
+    #[test]
+    fn sixty_hz_capture_produces_thirty_fps_without_drift() {
+        let start = Instant::now();
+        let interval = Duration::from_secs_f64(1.0 / 30.0);
+        let mut next = None;
+        let accepted = (0..120)
+            .filter(|frame| {
+                let now = start + Duration::from_micros(frame * 16_667);
+                frame_due(now, &mut next, interval)
+            })
+            .count();
+        assert_eq!(accepted, 60);
+    }
+
     #[tokio::test]
     async fn bitrate_commands_preserve_custom_values_and_gop_policy() {
         let pipeline = SharedVideoPipeline::new(SharedVideoPipelineConfig::default()).unwrap();
@@ -2296,7 +2338,7 @@ mod tests {
     }
 
     #[test]
-    fn source_reopen_updates_fps_and_gop_without_changing_geometry_or_bitrate() {
+    fn source_rate_cannot_exceed_requested_fps() {
         let mut config = SharedVideoPipelineConfig {
             control_mode: VideoControlMode::SourceFollowing,
             resolution: Resolution::HD1080,
@@ -2312,8 +2354,8 @@ mod tests {
         config.align_source_fps(None);
         assert_eq!(config.fps, 30);
         config.align_source_fps(Some(59.94));
-        assert_eq!(config.fps, 60);
-        assert_eq!(config.gop_size(), 120);
+        assert_eq!(config.fps, 30);
+        assert_eq!(config.gop_size(), 60);
     }
 
     #[test]

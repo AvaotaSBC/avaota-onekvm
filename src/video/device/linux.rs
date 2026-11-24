@@ -306,7 +306,8 @@ impl VideoDevice {
         let has_signal = live.has_signal;
 
         let native_hdmirx = is_rk_hdmirx_driver(&caps.driver, &caps.card);
-        let mut formats = if native_hdmirx || is_rkcif_driver(&caps.driver) {
+        let sunxi_vin = caps.driver == "sunxi-vin";
+        let mut formats = if native_hdmirx || is_rkcif_driver(&caps.driver) || sunxi_vin {
             // CSI/HDMI bridge drivers (rk_hdmirx, rkcif) expose multiple pixel
             // formats via ENUM_FMT (e.g. rk_hdmirx: BGR3/NV24/NV16/NV12) but
             // `ENUM_FRAMESIZES` is fiction for these drivers (rkcif reports a
@@ -315,7 +316,10 @@ impl VideoDevice {
             // resolution is whatever the bridge subdev's DV timings report,
             // so we treat the HDMI source mode as the single allowed
             // resolution for every pixel format.
-            self.enumerate_bridge_formats(subdev_hdmi_mode, native_hdmirx)?
+            // Sunxi VIN enumerates formats which its active CSI pipeline
+            // rejects in TRY_FMT. Probe the current G_FMT only, avoiding
+            // warnings and duplicate choices in the device list.
+            self.enumerate_bridge_formats(subdev_hdmi_mode, native_hdmirx || sunxi_vin)?
         } else {
             self.enumerate_formats()?
         };
@@ -938,7 +942,14 @@ impl VideoDevice {
 
 /// Enumerate all video capture devices
 pub fn enumerate_devices() -> Result<Vec<VideoDeviceInfo>> {
+    enumerate_devices_excluding(None)
+}
+
+/// Avoid opening a capture node already owned by the streaming pipeline.
+pub fn enumerate_devices_excluding(excluded: Option<&Path>) -> Result<Vec<VideoDeviceInfo>> {
     debug!("Enumerating video devices...");
+
+    let sunxi_vin_active = excluded.is_some_and(is_sunxi_vin_node);
 
     // First pass: collect candidates that pass the sysfs-based pre-filter.
     // This avoids opening orphan /dev/videoN nodes (ENODEV) and m2m codec
@@ -958,6 +969,11 @@ pub fn enumerate_devices() -> Result<Vec<VideoDeviceInfo>> {
 
         if !sysfs_maybe_capture(&path) {
             debug!("Skipping non-capture candidate (sysfs): {:?}", path);
+            continue;
+        }
+        if excluded == Some(path.as_path())
+            || (sunxi_vin_active && is_sunxi_vin_node(&path))
+        {
             continue;
         }
         candidates.push(path);
@@ -1030,6 +1046,14 @@ pub fn enumerate_devices() -> Result<Vec<VideoDeviceInfo>> {
     dedup_platform_subdevices(&mut devices);
     info!("Found {} video capture devices", devices.len());
     Ok(devices)
+}
+
+fn is_sunxi_vin_node(path: &Path) -> bool {
+    let Some(name) = path.file_name() else {
+        return false;
+    };
+    read_sysfs_string(&Path::new("/sys/class/video4linux").join(name).join("name"))
+        .is_some_and(|name| name.starts_with("vin_video"))
 }
 
 fn video_node_names(dir: &str) -> Vec<String> {

@@ -76,6 +76,7 @@ impl From<EncoderBackend> for H265EncoderType {
             EncoderBackend::Vaapi => H265EncoderType::Vaapi,
             EncoderBackend::Rkmpp => H265EncoderType::Rkmpp,
             EncoderBackend::V4l2m2m => H265EncoderType::V4l2M2m,
+            EncoderBackend::Cedar => H265EncoderType::Software,
             EncoderBackend::Software => H265EncoderType::Software,
         }
     }

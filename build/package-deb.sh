@@ -31,6 +31,16 @@ TARGETS=(
 package_arch() {
     local RUST_TARGET="$1"
     local DEB_ARCH="$2"
+    local PACKAGE_NAME="one-kvm"
+    local PACKAGE_VERSION="$VERSION"
+    if [ "${ONE_KVM_SUN55I_CEDAR:-0}" = "1" ]; then
+        if [ "$DEB_ARCH" != "arm64" ]; then
+            echo "Sun55i Cedar package requires arm64" >&2
+            return 1
+        fi
+        PACKAGE_NAME="one-kvm-sun55i"
+        PACKAGE_VERSION="${ONE_KVM_SUN55I_VERSION:-${VERSION}+sun55i$(date -u +%Y%m%d)}"
+    fi
 
     echo "========================================"
     echo "Packaging: $RUST_TARGET -> $DEB_ARCH"
@@ -44,7 +54,7 @@ package_arch() {
     fi
 
     local PKG_DIR="/tmp/one-kvm-pkg-$$"
-    local DEB_PATH="$OUTPUT_DIR/one-kvm_${VERSION}_${DEB_ARCH}.deb"
+    local DEB_PATH="$OUTPUT_DIR/${PACKAGE_NAME}_${PACKAGE_VERSION}_${DEB_ARCH}.deb"
 
     # Create package structure
     mkdir -p "$PKG_DIR/DEBIAN"
@@ -132,14 +142,23 @@ EOF
     if [ "$DEB_ARCH" = "amd64" ]; then
         DEPS="$DEPS, $AMD64_DEPS"
     fi
+    if [ "$PACKAGE_NAME" = "one-kvm-sun55i" ]; then
+        DEPS="$DEPS, avaota-cedar-encoder (>= 0.3.0+sun55i20261124)"
+    fi
+
+    local RELATIONS=""
+    if [ "$PACKAGE_NAME" = "one-kvm-sun55i" ]; then
+        RELATIONS=$'Provides: one-kvm\nConflicts: one-kvm\nReplaces: one-kvm'
+    fi
 
     cat > "$PKG_DIR/DEBIAN/control" <<EOF
-Package: one-kvm
-Version: $VERSION
+Package: $PACKAGE_NAME
+Version: $PACKAGE_VERSION
 Section: admin
 Priority: optional
 Architecture: $DEB_ARCH
 Depends: $DEPS
+$RELATIONS
 Recommends: bluez
 Maintainer: SilentWind <admin@mofeng.run>
 Description: A open and lightweight IP-KVM solution

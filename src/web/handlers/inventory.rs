@@ -206,6 +206,7 @@ fn validated_video_node(path: &str, sysfs_root: &std::path::Path) -> Option<std:
 }
 
 pub async fn video_input_status(
+    State(state): State<Arc<AppState>>,
     Query(query): Query<VideoInputStatusQuery>,
 ) -> Result<Json<crate::video::device::VideoInputStatus>> {
     #[cfg(unix)]
@@ -221,6 +222,10 @@ pub async fn video_input_status(
         .find(|device| device.path.to_string_lossy() == query.device)
         .map(|device| device.path)
         .ok_or_else(|| AppError::BadRequest("Invalid video device".to_string()))?;
+
+    if let Some(status) = state.stream_manager.active_video_input_status(&path).await {
+        return Ok(Json(status));
+    }
 
     let probe_path = path.clone();
     let status = tokio::task::spawn_blocking(move || {

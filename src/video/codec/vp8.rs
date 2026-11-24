@@ -57,6 +57,7 @@ impl From<EncoderBackend> for VP8EncoderType {
         match backend {
             EncoderBackend::Vaapi => VP8EncoderType::Vaapi,
             EncoderBackend::Software => VP8EncoderType::Software,
+            EncoderBackend::Cedar => VP8EncoderType::Software,
             _ => VP8EncoderType::None,
         }
     }

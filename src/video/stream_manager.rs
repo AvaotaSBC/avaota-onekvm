@@ -628,6 +628,52 @@ impl VideoStreamManager {
         self.streamer.list_devices().await
     }
 
+    /// Report the active capture without opening its exclusive V4L2 node again.
+    pub async fn active_video_input_status(
+        &self,
+        path: &std::path::Path,
+    ) -> Option<crate::video::device::VideoInputStatus> {
+        let mode = self.mode.read().await.clone();
+        let configured_path = if mode == StreamMode::WebRTC {
+            self.webrtc_streamer.current_capture_device_path().await
+        } else {
+            self.streamer.current_capture_config().await.0
+        };
+        if configured_path.as_deref() != Some(path) {
+            return None;
+        }
+        let (resolution, format, fps) = if mode == StreamMode::WebRTC {
+            if self.webrtc_streamer.session_count().await == 0 {
+                return None;
+            }
+            let stats = self.webrtc_streamer.pipeline_stats().await?;
+            if stats.current_fps <= 0.0 {
+                return Some(crate::video::device::VideoInputStatus::no_signal());
+            }
+            self.webrtc_streamer.current_video_geometry().await
+        } else {
+            if !self.streamer.is_streaming().await {
+                return None;
+            }
+            let state = self.streamer.state().await;
+            if state != StreamerState::Streaming {
+                return Some(if state.is_no_signal_like() {
+                    crate::video::device::VideoInputStatus::no_signal()
+                } else {
+                    crate::video::device::VideoInputStatus::unavailable()
+                });
+            }
+            let (_, resolution, format, fps, _) = self.streamer.current_capture_config().await;
+            (resolution, format, fps)
+        };
+        Some(crate::video::device::VideoInputStatus::locked(
+            format,
+            resolution.width,
+            resolution.height,
+            fps as f64,
+        ))
+    }
+
     /// Get streamer statistics
     ///
     /// In WebRTC mode, resolution/format/target_fps/fps reflect

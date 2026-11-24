@@ -694,6 +694,14 @@ impl WebRtcStreamer {
         }
     }
 
+    pub async fn current_capture_device_path(&self) -> Option<PathBuf> {
+        self.capture_device
+            .read()
+            .await
+            .as_ref()
+            .map(|capture| capture.device_path.clone())
+    }
+
     /// Request the encoder to generate a keyframe on next encode
     pub async fn request_keyframe(&self) -> Result<()> {
         if let Some(ref pipeline) = *self.video_pipeline.read().await {
@@ -1402,6 +1410,10 @@ impl crate::video::traits::VideoOutput for WebRtcStreamer {
 
     async fn current_video_geometry(&self) -> (Resolution, PixelFormat, u32) {
         self.current_video_geometry().await
+    }
+
+    async fn current_capture_device_path(&self) -> Option<PathBuf> {
+        self.current_capture_device_path().await
     }
 
     async fn pipeline_stats(&self) -> Option<SharedVideoPipelineStats> {

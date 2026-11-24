@@ -57,6 +57,7 @@ impl From<EncoderBackend> for VP9EncoderType {
         match backend {
             EncoderBackend::Vaapi => VP9EncoderType::Vaapi,
             EncoderBackend::Software => VP9EncoderType::Software,
+            EncoderBackend::Cedar => VP9EncoderType::Software,
             _ => VP9EncoderType::None,
         }
     }

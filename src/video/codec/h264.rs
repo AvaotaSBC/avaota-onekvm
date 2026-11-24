@@ -48,6 +48,7 @@ pub enum H264EncoderType {
     Rkmpp,
     /// V4L2 M2M (ARM generic) - requires hwcodec extension
     V4l2M2m,
+    Cedar,
     /// Software encoding (libx264/openh264)
     Software,
     /// No encoder available
@@ -64,6 +65,7 @@ impl std::fmt::Display for H264EncoderType {
             H264EncoderType::Vaapi => write!(f, "VAAPI"),
             H264EncoderType::Rkmpp => write!(f, "RKMPP"),
             H264EncoderType::V4l2M2m => write!(f, "V4L2 M2M"),
+            H264EncoderType::Cedar => write!(f, "Cedar (Sun55i)"),
             H264EncoderType::Software => write!(f, "Software"),
             H264EncoderType::None => write!(f, "None"),
         }
@@ -80,6 +82,7 @@ impl From<EncoderBackend> for H264EncoderType {
             EncoderBackend::Vaapi => H264EncoderType::Vaapi,
             EncoderBackend::Rkmpp => H264EncoderType::Rkmpp,
             EncoderBackend::V4l2m2m => H264EncoderType::V4l2M2m,
+            EncoderBackend::Cedar => H264EncoderType::Cedar,
             EncoderBackend::Software => H264EncoderType::Software,
         }
     }

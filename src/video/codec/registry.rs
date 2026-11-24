@@ -96,6 +96,8 @@ pub enum EncoderBackend {
     Rkmpp,
     /// V4L2 Memory-to-Memory (ARM)
     V4l2m2m,
+    /// Allwinner Sun55i CedarC
+    Cedar,
     /// Software encoding (libx264, libx265, libvpx)
     Software,
 }
@@ -103,7 +105,9 @@ pub enum EncoderBackend {
 impl EncoderBackend {
     /// Detect backend from codec name
     pub fn from_codec_name(name: &str) -> Self {
-        if name.contains("vaapi") {
+        if name == "h264_cedar" {
+            EncoderBackend::Cedar
+        } else if name.contains("vaapi") {
             EncoderBackend::Vaapi
         } else if name.contains("nvenc") {
             EncoderBackend::Nvenc
@@ -134,6 +138,7 @@ impl EncoderBackend {
             EncoderBackend::Amf => "AMF",
             EncoderBackend::Rkmpp => "RKMPP",
             EncoderBackend::V4l2m2m => "V4L2 M2M",
+            EncoderBackend::Cedar => "Cedar (Sun55i)",
             EncoderBackend::Software => "Software",
         }
     }
@@ -148,6 +153,7 @@ impl EncoderBackend {
             "amf" => Some(EncoderBackend::Amf),
             "rkmpp" => Some(EncoderBackend::Rkmpp),
             "v4l2m2m" | "v4l2" => Some(EncoderBackend::V4l2m2m),
+            "cedar" => Some(EncoderBackend::Cedar),
             "software" | "cpu" => Some(EncoderBackend::Software),
             _ => None,
         }
@@ -347,6 +353,24 @@ impl EncoderRegistry {
         }
 
         self.register_software_fallbacks();
+
+        if super::cedar::available() {
+            self.encoders
+                .entry(VideoEncoderType::H264)
+                .or_default()
+                .push(AvailableEncoder {
+                    format: VideoEncoderType::H264,
+                    codec_name: "h264_cedar".to_string(),
+                    backend: EncoderBackend::Cedar,
+                    priority: 0,
+                    is_hardware: true,
+                });
+            info!("Sun55i Cedar H.264 encoder available");
+        }
+
+        for encoders in self.encoders.values_mut() {
+            encoders.sort_by_key(|encoder| encoder.priority);
+        }
 
         // Log summary
         for (format, encoders) in &self.encoders {

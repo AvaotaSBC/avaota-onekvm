@@ -403,8 +403,12 @@ impl UniversalSession {
                     );
 
                     let new_state = match ice_state {
+                        // ICE readiness precedes DTLS/SRTP readiness. Starting the
+                        // video sender here can lose its first SPS/PPS and IDR.
+                        // The peer connection handler reports Connected once the
+                        // RTP transport is ready.
                         RTCIceConnectionState::Connected | RTCIceConnectionState::Completed => {
-                            ConnectionState::Connected
+                            return;
                         }
                         RTCIceConnectionState::Disconnected => ConnectionState::Disconnected,
                         RTCIceConnectionState::Failed => ConnectionState::Failed,

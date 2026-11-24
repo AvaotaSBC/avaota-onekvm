@@ -42,5 +42,6 @@ pub trait VideoOutput: Send + Sync {
     async fn set_bitrate_preset(&self, preset: BitratePreset) -> Result<()>;
     async fn request_keyframe(&self) -> Result<()>;
     async fn current_video_geometry(&self) -> (Resolution, PixelFormat, u32);
+    async fn current_capture_device_path(&self) -> Option<PathBuf>;
     async fn pipeline_stats(&self) -> Option<SharedVideoPipelineStats>;
 }

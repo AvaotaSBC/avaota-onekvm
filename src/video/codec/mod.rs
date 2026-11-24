@@ -3,6 +3,7 @@
 use hwcodec::common::DataFormat;
 use hwcodec::ffmpeg_ram::CodecInfo;
 
+pub mod cedar;
 pub mod convert;
 
 pub mod h264;

@@ -5,7 +5,7 @@ ARG DEBIAN_IMAGE=debian:12
 FROM ${DEBIAN_IMAGE}
 
 ARG CHINAMIRRO=0
-ARG GH_PROXY=https://gh-proxy.com/
+ARG GH_PROXY=
 ARG RUSTUP_DIST_SERVER_CN=https://mirrors.ustc.edu.cn/rust-static
 ARG RUSTUP_UPDATE_ROOT_CN=https://mirrors.ustc.edu.cn/rust-static/rustup
 ARG CARGO_INDEX_CN=https://mirrors.ustc.edu.cn/crates.io-index
@@ -97,7 +97,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Build static libjpeg-turbo from source (cross-compile for ARM64)
 RUN github_prefix="" \
-    && if [ "$CHINAMIRRO" = "1" ]; then github_prefix="${GH_PROXY%/}/"; fi \
+    && if [ -n "$GH_PROXY" ]; then github_prefix="${GH_PROXY%/}/"; fi \
     && git init /tmp/libjpeg-turbo \
     && cd /tmp/libjpeg-turbo \
     && git remote add origin "${github_prefix}https://github.com/libjpeg-turbo/libjpeg-turbo.git" \
@@ -119,7 +119,7 @@ RUN github_prefix="" \
 RUN git init /tmp/libyuv \
     && cd /tmp/libyuv \
     && github_prefix="" \
-    && if [ "$CHINAMIRRO" = "1" ]; then github_prefix="${GH_PROXY%/}/"; fi \
+    && if [ -n "$GH_PROXY" ]; then github_prefix="${GH_PROXY%/}/"; fi \
     && git remote add origin "${github_prefix}https://github.com/lemenkov/libyuv" \
     && git fetch --depth 1 origin ${LIBYUV_REV} \
     && git checkout --detach FETCH_HEAD \
@@ -142,7 +142,7 @@ RUN git init /tmp/libyuv \
 # Build static libvpx from source (cross-compile for ARM64)
 # CC/CXX/LD/AR must be environment variables, not configure arguments
 RUN github_prefix="" \
-    && if [ "$CHINAMIRRO" = "1" ]; then github_prefix="${GH_PROXY%/}/"; fi \
+    && if [ -n "$GH_PROXY" ]; then github_prefix="${GH_PROXY%/}/"; fi \
     && git init /tmp/libvpx \
     && cd /tmp/libvpx \
     && git remote add origin "${github_prefix}https://github.com/webmproject/libvpx.git" \
@@ -171,7 +171,7 @@ RUN github_prefix="" \
 
 # Build static libx264 from source (cross-compile for ARM64)
 RUN github_prefix="" \
-    && if [ "$CHINAMIRRO" = "1" ]; then github_prefix="${GH_PROXY%/}/"; fi \
+    && if [ -n "$GH_PROXY" ]; then github_prefix="${GH_PROXY%/}/"; fi \
     && git clone --depth 1 "${github_prefix}https://github.com/mirror/x264.git" /tmp/x264 \
     && cd /tmp/x264 \
     && export CC=aarch64-linux-gnu-gcc \
@@ -189,7 +189,7 @@ RUN github_prefix="" \
 
 # Build static libx265 from source (cross-compile for ARM64)
 RUN github_prefix="" \
-    && if [ "$CHINAMIRRO" = "1" ]; then github_prefix="${GH_PROXY%/}/"; fi \
+    && if [ -n "$GH_PROXY" ]; then github_prefix="${GH_PROXY%/}/"; fi \
     && git init /tmp/x265 \
     && cd /tmp/x265 \
     && git remote add origin "${github_prefix}https://github.com/videolan/x265.git" \
@@ -219,22 +219,22 @@ RUN github_prefix="" \
 
 # Create pkg-config file for x265 (required by FFmpeg)
 RUN mkdir -p /usr/aarch64-linux-gnu/lib/pkgconfig && \
-    cat > /usr/aarch64-linux-gnu/lib/pkgconfig/x265.pc <<EOF
-prefix=/usr/aarch64-linux-gnu
-exec_prefix=\${prefix}
-libdir=\${exec_prefix}/lib
-includedir=\${prefix}/include
-
-Name: x265
-Description: H.265/HEVC video encoder
-Version: 199
-Libs: -L\${libdir} -lx265 -lstdc++ -lm -ldl -lpthread
-Cflags: -I\${includedir}
-EOF
+    printf '%s\n' \
+        'prefix=/usr/aarch64-linux-gnu' \
+        'exec_prefix=${prefix}' \
+        'libdir=${exec_prefix}/lib' \
+        'includedir=${prefix}/include' \
+        '' \
+        'Name: x265' \
+        'Description: H.265/HEVC video encoder' \
+        'Version: 199' \
+        'Libs: -L${libdir} -lx265 -lstdc++ -lm -ldl -lpthread' \
+        'Cflags: -I${includedir}' \
+        > /usr/aarch64-linux-gnu/lib/pkgconfig/x265.pc
 
 # Build static libopus from source (cross-compile for ARM64)
 RUN github_prefix="" \
-    && if [ "$CHINAMIRRO" = "1" ]; then github_prefix="${GH_PROXY%/}/"; fi \
+    && if [ -n "$GH_PROXY" ]; then github_prefix="${GH_PROXY%/}/"; fi \
     && wget -O /tmp/opus.tar.gz "${github_prefix}https://github.com/xiph/opus/releases/download/v${OPUS_VERSION}/opus-${OPUS_VERSION}.tar.gz" \
     && tar -xzf /tmp/opus.tar.gz -C /tmp \
     && mv "/tmp/opus-${OPUS_VERSION}" /tmp/opus \
@@ -257,7 +257,7 @@ COPY build/cross/patches/0001-v4l2-m2m-reject-undersized-encoder-format.patch /t
 # Download and build FFmpeg with RKMPP support
 RUN mkdir -p /tmp/ffmpeg-build && cd /tmp/ffmpeg-build \
     && github_prefix="" \
-    && if [ "$CHINAMIRRO" = "1" ]; then github_prefix="${GH_PROXY%/}/"; fi \
+    && if [ -n "$GH_PROXY" ]; then github_prefix="${GH_PROXY%/}/"; fi \
     && git clone --depth 1 --branch ${RKMPP_BRANCH} "${github_prefix}https://github.com/nyanmisaka/mpp.git" rkmpp \
     && git clone --depth 1 --branch ${RKRGA_BRANCH} "${github_prefix}https://github.com/nyanmisaka/rk-mirrors.git" rkrga \
     && git init ffmpeg-rockchip \

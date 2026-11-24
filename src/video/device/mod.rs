@@ -7,8 +7,8 @@ mod windows;
 
 #[cfg(unix)]
 pub use linux::{
-    enumerate_devices, find_best_device, select_recovery_device, VideoDevice, VideoDeviceInfo,
-    VideoDeviceRecoveryHint,
+    enumerate_devices, enumerate_devices_excluding, find_best_device, select_recovery_device,
+    VideoDevice, VideoDeviceInfo, VideoDeviceRecoveryHint,
 };
 #[cfg(windows)]
 pub use windows::*;

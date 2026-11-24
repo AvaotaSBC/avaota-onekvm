@@ -128,6 +128,8 @@ class FFmpegRamEncoder {
 public:
   AVCodecContext *c_ = NULL;
   AVFrame *frame_ = NULL;
+  AVFrame *vp8_frame_ = NULL;
+  bool convert_vp8_ = false;
   AVPacket *pkt_ = NULL;
   std::string name_;
 
@@ -248,10 +250,32 @@ public:
     frame_->format = pixfmt_;
     frame_->width = width_;
     frame_->height = height_;
+    const char *full_range = getenv("ONE_KVM_YUV_FULL_RANGE");
+    if (full_range && strcmp(full_range, "1") == 0) {
+      frame_->color_range = AVCOL_RANGE_JPEG;
+      frame_->colorspace = AVCOL_SPC_BT709;
+      frame_->color_primaries = AVCOL_PRI_BT709;
+      frame_->color_trc = AVCOL_TRC_BT709;
+    }
 
     if ((ret = av_frame_get_buffer(frame_, align_)) < 0) {
       LOG_ERROR(std::string("av_frame_get_buffer failed, ret = ") + av_err2str(ret));
       return false;
+    }
+
+    if (full_range && strcmp(full_range, "1") == 0 && name_ == "libvpx" &&
+        pixfmt_ == AV_PIX_FMT_YUV420P) {
+      vp8_frame_ = av_frame_alloc();
+      if (!vp8_frame_)
+        return false;
+      vp8_frame_->format = pixfmt_;
+      vp8_frame_->width = width_;
+      vp8_frame_->height = height_;
+      vp8_frame_->color_range = AVCOL_RANGE_MPEG;
+      vp8_frame_->colorspace = AVCOL_SPC_BT470BG;
+      if (av_frame_get_buffer(vp8_frame_, align_) < 0)
+        return false;
+      convert_vp8_ = true;
     }
 
     if (!(pkt_ = av_packet_alloc())) {
@@ -265,6 +289,18 @@ public:
         hw_pixfmt_ != AV_PIX_FMT_NONE ? hw_pixfmt_ : (AVPixelFormat)pixfmt_;
     c_->sw_pix_fmt = (AVPixelFormat)pixfmt_;
     util_encode::set_av_codec_ctx(c_, name_, kbs_, gop_, fps_, thread_count_);
+    if (full_range && strcmp(full_range, "1") == 0) {
+      c_->color_range = AVCOL_RANGE_JPEG;
+      c_->colorspace = AVCOL_SPC_BT709;
+      c_->color_primaries = AVCOL_PRI_BT709;
+      c_->color_trc = AVCOL_TRC_BT709;
+      if (convert_vp8_) {
+        c_->color_range = AVCOL_RANGE_MPEG;
+        c_->colorspace = AVCOL_SPC_BT470BG;
+        c_->color_primaries = AVCOL_PRI_BT470BG;
+        c_->color_trc = AVCOL_TRC_BT709;
+      }
+    }
     if (!util_encode::set_lantency_free(c_->priv_data, name_)) {
       LOG_ERROR(std::string("set_lantency_free failed, name: ") + name_);
       return false;
@@ -306,6 +342,11 @@ public:
     }
     if ((ret = fill_frame(frame_, data, length, offset_)) != 0)
       return ret;
+    if (convert_vp8_) {
+      if ((ret = av_frame_make_writable(vp8_frame_)) < 0)
+        return ret;
+      convert_vp8_frame();
+    }
     AVFrame *tmp_frame;
     if (hw_device_type_ != AV_HWDEVICE_TYPE_NONE) {
       if ((ret = av_hwframe_transfer_data(hw_frame_, frame_, 0)) < 0) {
@@ -314,7 +355,7 @@ public:
       }
       tmp_frame = hw_frame_;
     } else {
-      tmp_frame = frame_;
+      tmp_frame = convert_vp8_ ? vp8_frame_ : frame_;
     }
 
     return do_encode(tmp_frame, obj, ms);
@@ -351,6 +392,8 @@ public:
       av_packet_free(&pkt_);
     if (frame_)
       av_frame_free(&frame_);
+    if (vp8_frame_)
+      av_frame_free(&vp8_frame_);
     if (hw_frame_)
       av_frame_free(&hw_frame_);
     if (hw_device_ctx_)
@@ -364,6 +407,41 @@ public:
   }
 
 private:
+  static uint8_t clip8(int value) {
+    return value < 0 ? 0 : value > 255 ? 255 : value;
+  }
+
+  void convert_vp8_frame() {
+    // VP8 decoders use limited-range BT.601. Convert the full-range BT.709
+    // capture samples before encoding, including the luma/chroma matrix.
+    for (int y = 0; y < height_; y++) {
+      const uint8_t *src_y = frame_->data[0] + y * frame_->linesize[0];
+      uint8_t *dst_y = vp8_frame_->data[0] + y * vp8_frame_->linesize[0];
+      const uint8_t *src_u = frame_->data[1] + (y / 2) * frame_->linesize[1];
+      const uint8_t *src_v = frame_->data[2] + (y / 2) * frame_->linesize[2];
+      for (int x = 0; x < width_; x++) {
+        int cb = static_cast<int>(src_u[x / 2]) - 128;
+        int cr = static_cast<int>(src_v[x / 2]) - 128;
+        dst_y[x] = clip8(((16 << 16) + 56284 * src_y[x] + 5717 * cb +
+                          11036 * cr + (1 << 15)) >> 16);
+      }
+    }
+    for (int y = 0; y < height_ / 2; y++) {
+      const uint8_t *src_u = frame_->data[1] + y * frame_->linesize[1];
+      const uint8_t *src_v = frame_->data[2] + y * frame_->linesize[2];
+      uint8_t *dst_u = vp8_frame_->data[1] + y * vp8_frame_->linesize[1];
+      uint8_t *dst_v = vp8_frame_->data[2] + y * vp8_frame_->linesize[2];
+      for (int x = 0; x < width_ / 2; x++) {
+        int cb = static_cast<int>(src_u[x]) - 128;
+        int cr = static_cast<int>(src_v[x]) - 128;
+        dst_u[x] = clip8(((128 << 16) + 56985 * cb - 6370 * cr +
+                          (1 << 15)) >> 16);
+        dst_v[x] = clip8(((128 << 16) - 4171 * cb + 56613 * cr +
+                          (1 << 15)) >> 16);
+      }
+    }
+  }
+
   int send_frame(AVFrame *frame) {
     const int ret = avcodec_send_frame(c_, frame);
     return ret;

@@ -306,7 +306,29 @@ impl Streamer {
 
     /// List available video devices
     pub async fn list_devices(&self) -> Result<Vec<VideoDeviceInfo>> {
-        enumerate_devices()
+        #[cfg(unix)]
+        {
+            let active = self
+                .current_device()
+                .await
+                .filter(|device| device.path.exists());
+            let mut devices = super::device::enumerate_devices_excluding(
+                active.as_ref().map(|device| device.path.as_path()),
+            )?;
+            if let Some(device) = active {
+                devices.push(device);
+                devices.sort_by(|a, b| {
+                    b.priority
+                        .cmp(&a.priority)
+                        .then_with(|| a.path.cmp(&b.path))
+                });
+            }
+            Ok(devices)
+        }
+        #[cfg(not(unix))]
+        {
+            enumerate_devices()
+        }
     }
 
     /// Validate and apply requested video parameters without auto-selection

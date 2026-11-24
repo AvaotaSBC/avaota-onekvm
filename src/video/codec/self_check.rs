@@ -235,6 +235,25 @@ fn run_smoke_test(
 }
 
 fn run_h264_smoke_test(resolution: Resolution, codec_name_ffmpeg: &str) -> Result<()> {
+    if codec_name_ffmpeg == "h264_cedar" {
+        let mut encoder = super::cedar::CedarH264::new(
+            resolution.width,
+            resolution.height,
+            30,
+            bitrate_kbps_for_resolution(resolution),
+            30,
+        )?;
+        let frame = build_nv12_test_frame(
+            resolution,
+            (resolution.width * resolution.height * 3 / 2) as usize,
+        );
+        let (data, _) = encoder.encode(&frame, 0)?;
+        return if data.is_empty() {
+            Err(AppError::VideoError("Cedar produced no output".into()))
+        } else {
+            Ok(())
+        };
+    }
     let mut encoder = H264Encoder::with_codec(
         H264Config::low_latency(resolution, bitrate_kbps_for_resolution(resolution)),
         codec_name_ffmpeg,

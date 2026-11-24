@@ -1,4 +1,5 @@
 use crate::error::{AppError, Result};
+use crate::video::codec::cedar::CedarH264;
 use crate::video::codec::convert::{MjpegToNv12Decoder, Nv12Converter, PixelConverter};
 use crate::video::codec::h264::{H264Config, H264Encoder, H264InputFormat};
 use crate::video::codec::h265::{H265Config, H265Encoder, H265InputFormat};
@@ -56,6 +57,31 @@ pub(super) struct EncodedFrame {
 
 struct H264EncoderWrapper(H264Encoder);
 
+struct CedarEncoderWrapper(CedarH264);
+
+impl VideoEncoderTrait for CedarEncoderWrapper {
+    fn encode_raw(&mut self, data: &[u8], pts_ms: i64) -> Result<Vec<EncodedFrame>> {
+        let (data, key) = self.0.encode(data, pts_ms)?;
+        Ok(vec![EncodedFrame {
+            data,
+            key: i32::from(key),
+            pts: pts_ms,
+        }])
+    }
+
+    fn set_bitrate(&mut self, bitrate_kbps: u32) -> Result<()> {
+        self.0.set_bitrate(bitrate_kbps)
+    }
+
+    fn codec_name(&self) -> &str {
+        "h264_cedar"
+    }
+
+    fn request_keyframe(&mut self) {
+        self.0.request_keyframe();
+    }
+}
+
 impl VideoEncoderTrait for H264EncoderWrapper {
     fn encode_raw(&mut self, data: &[u8], pts_ms: i64) -> Result<Vec<EncodedFrame>> {
         let frames = self.0.encode_raw(data, pts_ms)?;
@@ -104,6 +130,20 @@ fn create_h264_encoder(
     input_format: H264InputFormat,
     codec_name: &str,
 ) -> Result<Box<dyn VideoEncoderTrait + Send>> {
+    if codec_name == "h264_cedar" {
+        let encoder = CedarH264::new(
+            config.resolution.width,
+            config.resolution.height,
+            config.fps,
+            config.bitrate_kbps(),
+            config.gop_size(),
+        )?;
+        info!(
+            "Created H264 Cedar encoder at {}x{}",
+            config.resolution.width, config.resolution.height
+        );
+        return Ok(Box::new(CedarEncoderWrapper(encoder)));
+    }
     let encoder = H264Encoder::with_codec(
         H264Config {
             base: EncoderConfig::h264(config.resolution, config.bitrate_kbps()),
@@ -507,7 +547,9 @@ pub(super) fn build_encoder_state(
     };
 
     let codec_name = encoder.codec_name();
-    let use_direct_input = if codec_name.contains("rkmpp") {
+    let use_direct_input = if codec_name == "h264_cedar" {
+        pipeline_input_format == PixelFormat::Nv12
+    } else if codec_name.contains("rkmpp") {
         matches!(
             pipeline_input_format,
             PixelFormat::Yuyv

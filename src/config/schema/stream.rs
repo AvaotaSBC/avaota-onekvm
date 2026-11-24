@@ -104,6 +104,7 @@ pub enum EncoderType {
     Rkmpp,
     #[serde(alias = "amlogic")]
     V4l2m2m,
+    Cedar,
 }
 
 impl EncoderType {
@@ -117,6 +118,7 @@ impl EncoderType {
             EncoderType::Amf => "AMD AMF",
             EncoderType::Rkmpp => "Rockchip MPP",
             EncoderType::V4l2m2m => "V4L2 M2M",
+            EncoderType::Cedar => "Cedar (Sun55i)",
         }
     }
 }
