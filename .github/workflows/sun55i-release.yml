@@ -2,8 +2,7 @@ name: Sun55i ARM64 release
 
 on:
   push:
-    tags:
-      - 'sun55i-v*'
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -38,6 +37,8 @@ jobs:
     runs-on: ubuntu-22.04
     needs: frontend
     timeout-minutes: 180
+    outputs:
+      release_tag: ${{ steps.version.outputs.release_tag }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -49,15 +50,16 @@ jobs:
         with:
           shared-key: sun55i-arm64-release
           cache-all-crates: true
-      - name: Validate release version
+      - name: Set release version
+        id: version
         shell: bash
         run: |
           set -euo pipefail
-          package_version="${GITHUB_REF_NAME#sun55i-v}"
           base_version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
-          [[ "$package_version" == "$base_version"+sun55i* ]]
+          package_version="${base_version}+sun55i$(date -u +%Y%m%d%H%M%S).${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}"
           dpkg --validate-version "$package_version"
           echo "ONE_KVM_SUN55I_VERSION=$package_version" >> "$GITHUB_ENV"
+          echo "release_tag=sun55i-v$package_version" >> "$GITHUB_OUTPUT"
       - name: Install cross
         run: cargo install cross --version 0.2.5 --locked
       - name: Build ARM64 binary
@@ -99,12 +101,13 @@ jobs:
       - name: Publish Release
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.arm64.outputs.release_tag }}
         shell: bash
         run: |
           set -euo pipefail
-          gh release create "$GITHUB_REF_NAME" \
+          gh release create "$RELEASE_TAG" \
             release-artifacts/*.deb release-artifacts/*.sha256 \
             --repo "$GITHUB_REPOSITORY" \
-            --verify-tag \
-            --title "$GITHUB_REF_NAME" \
+            --target "$GITHUB_SHA" \
+            --title "$RELEASE_TAG" \
             --notes 'Sun55i ARM64 build with Cedar H.264 encoder support.'
