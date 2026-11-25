@@ -26,6 +26,9 @@ pub struct VideoConfig {
     pub format: Option<String>,
     pub width: u32,
     pub height: u32,
+    /// Encoded stream size; zero follows the HDMI input.
+    pub output_width: u32,
+    pub output_height: u32,
     pub fps: u32,
     pub quality: u32,
 }
@@ -37,6 +40,8 @@ impl Default for VideoConfig {
             format: None,
             width: 1920,
             height: 1080,
+            output_width: 0,
+            output_height: 0,
             fps: 30,
             quality: 80,
         }

@@ -105,7 +105,7 @@ pub enum EncoderBackend {
 impl EncoderBackend {
     /// Detect backend from codec name
     pub fn from_codec_name(name: &str) -> Self {
-        if name == "h264_cedar" {
+        if matches!(name, "h264_cedar" | "hevc_cedar") {
             EncoderBackend::Cedar
         } else if name.contains("vaapi") {
             EncoderBackend::Vaapi
@@ -366,6 +366,16 @@ impl EncoderRegistry {
                     is_hardware: true,
                 });
             info!("Sun55i Cedar H.264 encoder available");
+        }
+        if super::cedar::h265_available() {
+            self.encoders.entry(VideoEncoderType::H265).or_default().push(AvailableEncoder {
+                format: VideoEncoderType::H265,
+                codec_name: "hevc_cedar".to_string(),
+                backend: EncoderBackend::Cedar,
+                priority: 0,
+                is_hardware: true,
+            });
+            info!("Sun55i Cedar H.265 encoder available");
         }
 
         for encoders in self.encoders.values_mut() {

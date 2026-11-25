@@ -99,6 +99,8 @@ export default {
 },
 
   videoInput: {
+    outputResolution: 'Encoded resolution (Cedar H.264)',
+    followInput: 'Follow input',
     format: 'Input Format',
     resolution: 'Resolution',
     frameRate: 'Frame Rate',

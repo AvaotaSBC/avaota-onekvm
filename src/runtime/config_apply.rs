@@ -65,6 +65,11 @@ pub(crate) async fn apply_video_config(state: &AppState, new_config: &VideoConfi
         .await
         .map_err(|e| AppError::VideoError(format!("Failed to apply video config: {}", e)))?;
 
+    let output_resolution = (new_config.output_width != 0 && new_config.output_height != 0)
+        .then(|| crate::video::format::Resolution::new(
+            new_config.output_width, new_config.output_height));
+    state.webrtc.update_output_resolution(output_resolution).await;
+
     tracing::info!("Video config applied successfully");
     Ok(())
 }

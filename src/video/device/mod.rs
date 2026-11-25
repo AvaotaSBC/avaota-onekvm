@@ -106,7 +106,7 @@ pub(crate) fn is_rkcif_driver(driver: &str) -> bool {
 }
 
 pub fn control_mode(driver: &str, card: &str) -> VideoControlMode {
-    if is_rkcif_driver(driver) || is_rk_hdmirx_driver(driver, card) {
+    if is_rkcif_driver(driver) || is_rk_hdmirx_driver(driver, card) || driver == "sunxi-vin" {
         VideoControlMode::SourceFollowing
     } else {
         VideoControlMode::Configurable
@@ -223,6 +223,10 @@ mod tests {
         );
         assert_eq!(
             control_mode("rk_hdmirx", "capture"),
+            VideoControlMode::SourceFollowing
+        );
+        assert_eq!(
+            control_mode("sunxi-vin", "sunxi-vin"),
             VideoControlMode::SourceFollowing
         );
         assert_eq!(

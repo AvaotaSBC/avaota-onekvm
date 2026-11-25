@@ -377,17 +377,28 @@ impl Streamer {
         *self.state.write().await = StreamerState::Busy;
         self.publish_event(self.current_state_event().await).await;
 
-        let devices = enumerate_devices()?;
-        let device = if device_path.eq_ignore_ascii_case("auto") {
-            devices
-                .into_iter()
-                .next()
-                .ok_or_else(|| AppError::VideoError("No video devices found".to_string()))?
-        } else {
-            devices
-                .into_iter()
-                .find(|d| d.path.to_string_lossy() == device_path)
-                .ok_or_else(|| AppError::VideoError("Video device not found".to_string()))?
+        // VIN rejects a second open while the WebRTC capture owns video0.
+        // Reuse the already selected device when applying settings to it.
+        let current = self.current_device.read().await.clone().filter(|device| {
+            device.path.exists()
+                && (device_path.eq_ignore_ascii_case("auto")
+                    || device.path.to_string_lossy() == device_path)
+        });
+        let device = match current {
+            Some(device) => device,
+            None => {
+                let devices = enumerate_devices()?;
+                if device_path.eq_ignore_ascii_case("auto") {
+                    devices.into_iter().next().ok_or_else(|| {
+                        AppError::VideoError("No video devices found".to_string())
+                    })?
+                } else {
+                    devices
+                        .into_iter()
+                        .find(|d| d.path.to_string_lossy() == device_path)
+                        .ok_or_else(|| AppError::VideoError("Video device not found".to_string()))?
+                }
+            }
         };
 
         let resolved = self.resolve_capture_config(&device, format, resolution, fps)?;

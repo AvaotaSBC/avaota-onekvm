@@ -16,6 +16,7 @@ import {
   SelectContent,
   SelectItem,
   SelectTrigger,
+  SelectValue,
 } from '@/components/ui/select'
 import { Monitor, RefreshCw, Loader2, Zap, Scale, Image } from 'lucide-vue-next'
 import HelpTooltip from '@/components/HelpTooltip.vue'
@@ -172,6 +173,7 @@ const translateBackendName = (backend: string | undefined): string => {
 const selectedDevice = ref<string>('')
 const selectedFormat = ref<string>('')
 const selectedResolution = ref<string>('')
+const selectedOutputResolution = ref<string>('0x0')
 const selectedFps = ref<number | null>(30)
 const selectedBitratePreset = ref<'Speed' | 'Balanced' | 'Quality'>('Balanced')
 const isDirty = ref(false)
@@ -312,6 +314,7 @@ function initializeFromCurrent() {
   selectedDevice.value = config.device
   selectedFormat.value = config.format
   selectedResolution.value = `${config.width}x${config.height}`
+  selectedOutputResolution.value = `${configStore.video?.output_width || 0}x${configStore.video?.output_height || 0}`
   selectedFps.value = config.fps
   isDirty.value = false
 }
@@ -330,6 +333,7 @@ function syncFromCurrentIfChanged() {
   selectedDevice.value = config.device
   selectedFormat.value = config.format
   selectedResolution.value = nextResolution
+  selectedOutputResolution.value = `${configStore.video?.output_width || 0}x${configStore.video?.output_height || 0}`
   selectedFps.value = config.fps
   isDirty.value = false
 }
@@ -433,6 +437,12 @@ function handleFpsChange(fps: unknown) {
   isDirty.value = true
 }
 
+function handleOutputResolutionChange(value: unknown) {
+  if (typeof value !== 'string') return
+  selectedOutputResolution.value = value
+  isDirty.value = true
+}
+
 async function applyBitratePreset(preset: 'Speed' | 'Balanced' | 'Quality') {
   if (applyingBitrate.value) return
   applyingBitrate.value = true
@@ -454,12 +464,15 @@ function handleBitratePresetChange(preset: 'Speed' | 'Balanced' | 'Quality') {
 }
 
 async function applyVideoConfig() {
+  // Bitrate presets apply immediately and do not require restarting capture.
+  if (!isDirty.value) return
   const [width, height] = selectedResolution.value.split('x').map(Number)
+  const [outputWidth, outputHeight] = selectedOutputResolution.value.split('x').map(Number)
 
   applying.value = true
   try {
     await configStore.updateVideo(isSourceFollowing.value
-      ? { device: selectedDevice.value }
+      ? { device: selectedDevice.value, output_width: outputWidth, output_height: outputHeight }
       : {
           device: selectedDevice.value,
           format: selectedFormat.value,
@@ -771,11 +784,24 @@ watch(
             @refresh="refreshInputStatus"
           />
 
+          <div v-if="isSourceFollowing && videoMode === 'h264'" class="settings-field space-y-2">
+            <Label class="text-xs text-muted-foreground">{{ t('videoInput.outputResolution') }}</Label>
+            <Select :model-value="selectedOutputResolution" @update:model-value="handleOutputResolutionChange">
+              <SelectTrigger size="sm" class="w-full text-xs"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="0x0">{{ t('videoInput.followInput') }}</SelectItem>
+                <SelectItem v-if="(selectedDeviceInfo?.input_status.width || 0) >= 1280 && (selectedDeviceInfo?.input_status.height || 0) >= 720" value="1280x720">1280x720</SelectItem>
+                <SelectItem v-if="(selectedDeviceInfo?.input_status.width || 0) >= 960 && (selectedDeviceInfo?.input_status.height || 0) >= 540" value="960x540">960x540</SelectItem>
+                <SelectItem v-if="(selectedDeviceInfo?.input_status.width || 0) >= 640 && (selectedDeviceInfo?.input_status.height || 0) >= 360" value="640x360">640x360</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
           <!-- Apply Button -->
           <Button
             size="sm"
             class="w-full text-xs"
-            :disabled="applying || !selectedDevice || (!isSourceFollowing && !selectedFormat)"
+            :disabled="applying || !isDirty || !selectedDevice || (!isSourceFollowing && !selectedFormat)"
             @click="applyVideoConfig"
           >
             <Loader2 v-if="applying" class="size-3.5 mr-1.5 animate-spin" />

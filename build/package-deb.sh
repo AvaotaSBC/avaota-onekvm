@@ -143,7 +143,7 @@ EOF
         DEPS="$DEPS, $AMD64_DEPS"
     fi
     if [ "$PACKAGE_NAME" = "one-kvm-sun55i" ]; then
-        DEPS="$DEPS, avaota-cedar-encoder (>= 0.3.0+sun55i20261124)"
+        DEPS="$DEPS, avaota-cedar-encoder (>= 0.4.3+sun55i20261125)"
     fi
 
     local RELATIONS=""

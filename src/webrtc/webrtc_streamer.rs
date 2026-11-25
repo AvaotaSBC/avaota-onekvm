@@ -31,6 +31,25 @@ use super::universal_session::{UniversalSession, UniversalSessionConfig};
 const H264_PROFILE_DETECT_TIMEOUT: Duration = Duration::from_millis(500);
 const PIPELINE_RELEASE_TIMEOUT: Duration = Duration::from_secs(5);
 
+fn cedar_output_resolution(
+    config: &WebRtcStreamerConfig,
+    codec: VideoCodecType,
+) -> Option<Resolution> {
+    if codec != VideoCodecType::H264 || config.input_format != PixelFormat::Nv12 {
+        return None;
+    }
+    let registry = crate::video::codec::registry::EncoderRegistry::global();
+    let selected = match config.encoder_backend {
+        Some(backend) => registry.encoder_with_backend(VideoEncoderType::H264, backend),
+        None => registry.best_available_encoder(VideoEncoderType::H264),
+    };
+    if selected.is_some_and(|encoder| encoder.backend == EncoderBackend::Cedar) {
+        config.output_resolution
+    } else {
+        None
+    }
+}
+
 fn update_signal_recovery_edge(pending: &AtomicBool, state: &str) -> bool {
     match state {
         "no_signal" => {
@@ -47,6 +66,7 @@ pub struct WebRtcStreamerConfig {
     pub webrtc: WebRtcConfig,
     pub video_codec: VideoCodecType,
     pub resolution: Resolution,
+    pub output_resolution: Option<Resolution>,
     pub input_format: PixelFormat,
     pub bitrate_preset: BitratePreset,
     pub fps: u32,
@@ -60,6 +80,7 @@ impl Default for WebRtcStreamerConfig {
             webrtc: WebRtcConfig::default(),
             video_codec: VideoCodecType::H264,
             resolution: Resolution::HD720,
+            output_resolution: None,
             input_format: PixelFormat::Mjpeg,
             bitrate_preset: BitratePreset::Balanced,
             fps: 30,
@@ -506,6 +527,7 @@ impl WebRtcStreamer {
                     .map(|capture| capture.control_mode)
                     .unwrap_or(VideoControlMode::Configurable),
                 resolution: config.resolution,
+                output_resolution: cedar_output_resolution(&config, codec),
                 input_format: config.input_format,
                 output_codec: Self::codec_type_to_encoder_type(codec),
                 bitrate_preset: config.bitrate_preset,
@@ -884,6 +906,18 @@ impl WebRtcStreamer {
         self.notify_device_info_dirty().await;
     }
 
+    pub async fn update_output_resolution(&self, resolution: Option<Resolution>) {
+        if self.config.read().await.output_resolution == resolution {
+            return;
+        }
+        self.close_all_sessions().await;
+        if let Err(error) = self.stop_video_pipeline_and_release().await {
+            warn!("Failed to release video pipeline for output resolution change: {}", error);
+            return;
+        }
+        self.config.write().await.output_resolution = resolution;
+    }
+
     /// Update the input mode to match DV-negotiated capture without stopping
     /// the pipeline or closing sessions. Used when hardware timing differs from
     /// saved settings (e.g. RK628 `S_FMT` follows source while SQLite still has
@@ -1055,7 +1089,7 @@ impl WebRtcStreamer {
         let session_config = UniversalSessionConfig {
             webrtc: config.webrtc.clone(),
             codec: Self::codec_type_to_encoder_type(codec),
-            resolution: config.resolution,
+            resolution: cedar_output_resolution(&config, codec).unwrap_or(config.resolution),
             input_format: config.input_format,
             bitrate_preset: config.bitrate_preset,
             fps: config.fps,
@@ -1280,8 +1314,7 @@ impl WebRtcStreamer {
 
     /// Set bitrate using preset
     ///
-    /// Note: Hardware encoders (VAAPI, NVENC, etc.) don't support dynamic bitrate changes.
-    /// This method restarts the pipeline to apply the new bitrate only if the preset actually changed.
+    /// Apply the bitrate to the active encoder without interrupting capture or peers.
     pub async fn set_bitrate_preset(&self, preset: BitratePreset) -> Result<()> {
         // Check if preset actually changed
         let current_preset = self.config.read().await.bitrate_preset;
@@ -1290,43 +1323,18 @@ impl WebRtcStreamer {
             return Ok(());
         }
 
-        // Update config
-        self.config.write().await.bitrate_preset = preset;
-
-        // Check if pipeline exists and is running
-        let pipeline_running = {
-            if let Some(ref pipeline) = *self.video_pipeline.read().await {
-                pipeline.is_running()
-            } else {
-                false
-            }
-        };
-
-        if pipeline_running {
-            info!("Restarting video pipeline to apply new bitrate: {}", preset);
-
-            self.stop_video_pipeline_and_release().await?;
-
-            let has_source = self.capture_device.read().await.is_some();
-            if !has_source {
-                return Ok(());
-            }
-
-            let reconnected = self
-                .reconnect_sessions_to_current_pipeline("bitrate change")
-                .await?;
-            if reconnected > 0 {
-                info!(
-                    "Video pipeline restarted with {}, reconnected {} sessions",
-                    preset, reconnected
-                );
-            }
+        let pipeline = self.video_pipeline.read().await.clone();
+        if let Some(pipeline) = pipeline.filter(|pipeline| pipeline.is_running()) {
+            pipeline.set_bitrate_preset(preset).await?;
+            info!("Updated active video encoder bitrate: {}", preset);
         } else {
             debug!(
                 "Pipeline not running, bitrate {} will apply on next start",
                 preset
             );
         }
+
+        self.config.write().await.bitrate_preset = preset;
 
         Ok(())
     }

@@ -18,6 +18,18 @@ fn stream_mode_label(mode: StreamMode, codec: crate::video::codec::VideoCodecTyp
 /// Get stream state
 pub async fn stream_state(State(state): State<Arc<AppState>>) -> Json<StreamerStats> {
     let mut stats = state.stream_manager.stats().await;
+    // The event bus retains the last capture state after the WebRTC pipeline
+    // closes. Do not report an old "device_busy" or "streaming" event when
+    // there is no capture pipeline or viewer.
+    if state.stream_manager.current_mode().await == StreamMode::WebRTC
+        && stats.clients == 0
+        && state.webrtc.pipeline_stats().await.is_none()
+    {
+        stats.state = "ready".to_string();
+        stats.reason = None;
+        stats.fps = 0.0;
+        return Json(stats);
+    }
     if let Some(SystemEvent::StreamStateChanged {
         state: event_state,
         reason,
@@ -351,13 +363,14 @@ pub async fn stream_codecs_list() -> Json<AvailableCodecsResponse> {
     // Build codecs list (for backward compatibility)
     let mut codecs = Vec::new();
 
-    // MJPEG is always available (HTTP streaming)
+    // MJPEG can use Cedar JPEG on Sun55i; TurboJPEG remains available.
+    let mjpeg_hardware = crate::video::codec::cedar::jpeg_available();
     codecs.push(VideoCodecInfo {
         id: "mjpeg".to_string(),
         name: "MJPEG / HTTP".to_string(),
         protocol: "http".to_string(),
-        hardware: false,
-        backend: Some("software".to_string()),
+        hardware: mjpeg_hardware,
+        backend: Some(if mjpeg_hardware { "cedar" } else { "software" }.to_string()),
         available: true,
     });
 

@@ -40,21 +40,20 @@ use super::mjpeg_admission::{MjpegAdmissionPolicy, MjpegAdmissionStage, MjpegDro
 mod dmabuf;
 
 #[cfg(any(test, all(target_os = "linux", feature = "rkmpp")))]
-fn rkmpp_dma_eligible(
+fn hardware_dma_eligible(
     backend: Option<EncoderBackend>,
     codec: VideoEncoderType,
     format: PixelFormat,
 ) -> bool {
-    backend == Some(EncoderBackend::Rkmpp)
-        && matches!(codec, VideoEncoderType::H264 | VideoEncoderType::H265)
-        && matches!(
-            format,
-            PixelFormat::Bgr24
-                | PixelFormat::Nv12
-                | PixelFormat::Yuyv
-                | PixelFormat::Rgb24
-                | PixelFormat::Mjpeg
-        )
+    match backend {
+        Some(EncoderBackend::Rkmpp) =>
+            matches!(codec, VideoEncoderType::H264 | VideoEncoderType::H265)
+                && matches!(format, PixelFormat::Bgr24 | PixelFormat::Nv12 | PixelFormat::Yuyv | PixelFormat::Rgb24 | PixelFormat::Mjpeg),
+        Some(EncoderBackend::Cedar) =>
+            matches!(codec, VideoEncoderType::H264 | VideoEncoderType::H265)
+                && format == PixelFormat::Nv12,
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -78,11 +77,11 @@ mod dma_selection_tests {
                     PixelFormat::Rgb24,
                     PixelFormat::Mjpeg,
                 ] {
-                    assert!(!rkmpp_dma_eligible(Some(backend), codec, format));
+                    assert!(!hardware_dma_eligible(Some(backend), codec, format));
                 }
             }
         }
-        assert!(!rkmpp_dma_eligible(
+        assert!(!hardware_dma_eligible(
             None,
             VideoEncoderType::H264,
             PixelFormat::Nv12
@@ -95,7 +94,7 @@ mod dma_selection_tests {
                 PixelFormat::Rgb24,
                 PixelFormat::Mjpeg,
             ] {
-                assert!(rkmpp_dma_eligible(
+                assert!(hardware_dma_eligible(
                     Some(EncoderBackend::Rkmpp),
                     codec,
                     format
@@ -108,15 +107,25 @@ mod dma_selection_tests {
             PixelFormat::Nv24,
             PixelFormat::Yuv420,
         ] {
-            assert!(!rkmpp_dma_eligible(
+            assert!(!hardware_dma_eligible(
                 Some(EncoderBackend::Rkmpp),
                 VideoEncoderType::H264,
                 format
             ));
         }
-        assert!(!rkmpp_dma_eligible(
+        assert!(!hardware_dma_eligible(
             Some(EncoderBackend::Rkmpp),
             VideoEncoderType::VP9,
+            PixelFormat::Nv12
+        ));
+        assert!(hardware_dma_eligible(
+            Some(EncoderBackend::Cedar),
+            VideoEncoderType::H264,
+            PixelFormat::Nv12
+        ));
+        assert!(hardware_dma_eligible(
+            Some(EncoderBackend::Cedar),
+            VideoEncoderType::H265,
             PixelFormat::Nv12
         ));
     }
@@ -366,6 +375,8 @@ pub struct SharedVideoPipelineConfig {
     pub control_mode: VideoControlMode,
     /// Input resolution
     pub resolution: Resolution,
+    /// Optional encoded dimensions; capture always follows the HDMI input.
+    pub output_resolution: Option<Resolution>,
     /// Input pixel format
     pub input_format: PixelFormat,
     /// Output codec type
@@ -383,6 +394,7 @@ impl Default for SharedVideoPipelineConfig {
         Self {
             control_mode: VideoControlMode::Configurable,
             resolution: Resolution::HD720,
+            output_resolution: None,
             input_format: PixelFormat::Yuyv,
             output_codec: VideoEncoderType::H264,
             bitrate_preset: crate::video::codec::BitratePreset::Balanced,
@@ -1257,6 +1269,10 @@ impl SharedVideoPipeline {
                 let mut encoded_frame_count: u64 = 0;
                 let mut last_fps_time = Instant::now();
                 let mut fps_frame_count: u64 = 0;
+                let mut diagnostic_time = Instant::now();
+                let mut diagnostic_inputs = 0u64;
+                let mut diagnostic_outputs = 0u64;
+                let mut diagnostic_encode_us = 0u128;
                 let encode_error_throttler = LogThrottler::with_secs(ENCODE_ERROR_THROTTLE_SECS);
                 let mut suppressed_encode_errors: HashMap<String, u64> = HashMap::new();
 
@@ -1285,16 +1301,20 @@ impl SharedVideoPipeline {
                     }
 
                     input_frame_count = input_frame_count.wrapping_add(1);
+                    diagnostic_inputs += 1;
                     pipeline
                         .encoded_input_frames
                         .fetch_add(1, Ordering::Relaxed);
+                    let encode_started = Instant::now();
                     let encode_result = pipeline.encode_frame_sync(&mut encoder_state, &frame);
+                    diagnostic_encode_us += encode_started.elapsed().as_micros();
 
                     match encode_result {
                         Ok(encoded_frames) => {
                             encoded_frame_count =
                                 encoded_frame_count.wrapping_add(encoded_frames.len() as u64);
                             fps_frame_count += encoded_frames.len() as u64;
+                            diagnostic_outputs += encoded_frames.len() as u64;
                             let frames: EncodedBatch = encoded_frames
                                 .into_iter()
                                 .map(Arc::new)
@@ -1309,6 +1329,20 @@ impl SharedVideoPipeline {
                                 &e,
                             );
                         }
+                    }
+
+                    if diagnostic_time.elapsed() >= Duration::from_secs(5) {
+                        debug!(
+                            "Video encoder: inputs={} outputs={} mean_encode_ms={:.2} over {:.1}s",
+                            diagnostic_inputs,
+                            diagnostic_outputs,
+                            diagnostic_encode_us as f64 / diagnostic_inputs.max(1) as f64 / 1000.0,
+                            diagnostic_time.elapsed().as_secs_f64(),
+                        );
+                        diagnostic_time = Instant::now();
+                        diagnostic_inputs = 0;
+                        diagnostic_outputs = 0;
+                        diagnostic_encode_us = 0;
                     }
 
                     let fps_elapsed = last_fps_time.elapsed();
@@ -1425,6 +1459,11 @@ impl SharedVideoPipeline {
 
                 let mut no_subscribers_since: Option<Instant> = None;
                 let mut capture_sequence = 0u64;
+                let mut diagnostic_capture_time = Instant::now();
+                let mut diagnostic_capture_frames = 0u64;
+                let mut diagnostic_mailbox_drops = 0u64;
+                let mut diagnostic_sequence_gaps = 0u64;
+                let mut last_v4l2_sequence: Option<u64> = None;
                 let frame_interval = Duration::from_secs_f64(1.0 / config.fps.max(1) as f64);
                 let mut next_output_frame: Option<Instant> = None;
                 let grace_period = Duration::from_secs(AUTO_STOP_GRACE_PERIOD_SECS);
@@ -1608,6 +1647,11 @@ impl SharedVideoPipeline {
                             }
                             consecutive_timeouts = 0;
                             stream = None;
+                            if recovery_policy.control_mode() == VideoControlMode::SourceFollowing
+                                && bridge_ctx.has_subdev()
+                            {
+                                std::thread::sleep(Duration::from_secs(1));
+                            }
                             continue;
                         }
                         Err(CaptureReadError::Io(e)) => {
@@ -1625,6 +1669,9 @@ impl SharedVideoPipeline {
                                         Some(delay.as_millis() as u64),
                                     ));
                                     stream = None;
+                                    if bridge_ctx.has_subdev() {
+                                        std::thread::sleep(Duration::from_secs(1));
+                                    }
                                     continue;
                                 }
 
@@ -1717,6 +1764,12 @@ impl SharedVideoPipeline {
 
                     owned.truncate(frame_size);
                     capture_sequence = capture_sequence.wrapping_add(1);
+                    diagnostic_capture_frames += 1;
+                    if let Some(previous) = last_v4l2_sequence {
+                        diagnostic_sequence_gaps +=
+                            meta.sequence.saturating_sub(previous.saturating_add(1));
+                    }
+                    last_v4l2_sequence = Some(meta.sequence);
                     if pipeline.snapshot_slot.pending() {
                         pipeline.snapshot_slot.publish(&VideoFrame::from_vec(
                             owned.clone(),
@@ -1727,10 +1780,12 @@ impl SharedVideoPipeline {
                         ));
                     }
 
-                    // Source-following HDMI capture can deliver 60 frames/s even when
-                    // the requested output is 30. Discard excess frames before
-                    // decoding or encoding so the mailbox stays close to live input.
-                    if !frame_due(Instant::now(), &mut next_output_frame, frame_interval) {
+                    // Only pace capture when the input is faster than the requested
+                    // output. At matching rates, timestamp jitter can otherwise
+                    // discard a frame that arrives just before the deadline.
+                    if active_fps > config.fps
+                        && !frame_due(Instant::now(), &mut next_output_frame, frame_interval)
+                    {
                         buffer_pool.put(owned);
                         continue;
                     }
@@ -1810,12 +1865,26 @@ impl SharedVideoPipeline {
                         frame_stride,
                         capture_sequence,
                     ));
-                    if frame_mailbox.publish(capture_sequence, frame) != PublishResult::Published
-                        && mjpeg_decoder.is_some()
-                    {
-                        pipeline
-                            .decoded_frames_not_encoded
-                            .fetch_add(1, Ordering::Relaxed);
+                    if frame_mailbox.publish(capture_sequence, frame) != PublishResult::Published {
+                        diagnostic_mailbox_drops += 1;
+                        if mjpeg_decoder.is_some() {
+                            pipeline
+                                .decoded_frames_not_encoded
+                                .fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                    if diagnostic_capture_time.elapsed() >= Duration::from_secs(5) {
+                        debug!(
+                            "Video capture: frames={} v4l2_sequence_gaps={} mailbox_drops={} over {:.1}s",
+                            diagnostic_capture_frames,
+                            diagnostic_sequence_gaps,
+                            diagnostic_mailbox_drops,
+                            diagnostic_capture_time.elapsed().as_secs_f64(),
+                        );
+                        diagnostic_capture_time = Instant::now();
+                        diagnostic_capture_frames = 0;
+                        diagnostic_sequence_gaps = 0;
+                        diagnostic_mailbox_drops = 0;
                     }
                 }
 

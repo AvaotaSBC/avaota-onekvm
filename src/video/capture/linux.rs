@@ -48,6 +48,14 @@ fn append_capture_plane(dst: &mut Vec<u8>, mapping: &[u8], offset: usize, bytes:
     dst.extend_from_slice(&mapping[start..end]);
 }
 
+fn lt6911_raw_geometry(debug: &str) -> Option<Resolution> {
+    let raw = debug
+        .split_whitespace()
+        .find_map(|field| field.strip_prefix("raw="))?;
+    let (width, height) = raw.split_once('x')?;
+    Some(Resolution::new(width.parse().ok()?, height.parse().ok()?))
+}
+
 /// When set, DV ioctls use the subdev (rkcif: video node has no DV ioctls).
 #[derive(Debug, Clone, Default)]
 pub struct BridgeContext {
@@ -79,6 +87,8 @@ pub struct CaptureStream {
     bridge_kind: Option<CsiBridgeKind>,
     native_hdmirx_state: Option<NativeHdmirxState>,
     native_hdmirx_next_state_check: Option<Instant>,
+    lt6911_signal_debug_path: Option<PathBuf>,
+    lt6911_next_state_check: Option<Instant>,
     #[cfg(feature = "rkmpp")]
     dma_layout_bytes: Option<usize>,
 }
@@ -276,6 +286,20 @@ impl CaptureStream {
         });
         let native_hdmirx_next_state_check =
             native_hdmirx_state.map(|_| Instant::now() + Duration::from_secs(1));
+        let lt6911_signal_debug_path = if bridge.kind == Some(CsiBridgeKind::Lt6911) {
+            bridge.subdev_path.as_ref().and_then(|path| {
+                let name = path.file_name()?;
+                let signal_debug = Path::new("/sys/class/video4linux")
+                    .join(name)
+                    .join("device/signal_debug");
+                signal_debug.exists().then_some(signal_debug)
+            })
+        } else {
+            None
+        };
+        let lt6911_next_state_check = lt6911_signal_debug_path
+            .as_ref()
+            .map(|_| Instant::now() + Duration::from_millis(500));
 
         let stride = actual_fmt
             .plane_fmt
@@ -364,6 +388,8 @@ impl CaptureStream {
             bridge_kind: bridge.kind,
             native_hdmirx_state,
             native_hdmirx_next_state_check,
+            lt6911_signal_debug_path,
+            lt6911_next_state_check,
             #[cfg(feature = "rkmpp")]
             dma_layout_bytes,
         };
@@ -458,6 +484,17 @@ impl CaptureStream {
     fn dequeue_buffer(&mut self) -> std::result::Result<V4l2Buffer, CaptureReadError> {
         self.wait_ready()?;
 
+        if self
+            .lt6911_next_state_check
+            .is_some_and(|next| Instant::now() >= next)
+        {
+            self.lt6911_next_state_check = Some(Instant::now() + Duration::from_millis(500));
+            if self.lt6911_raw_geometry_changed() {
+                info!("LT6911 detected a new source geometry; requesting stream re-open");
+                return Err(CaptureReadError::SourceChanged);
+            }
+        }
+
         // Several vendor BSPs update G_FMT/DV timings without making the
         // subscribed video fd poll as POLLPRI.  Check once per second so a
         // genuine source mode change cannot leave us dequeuing buffers with
@@ -529,7 +566,29 @@ impl CaptureStream {
         &mut self,
         consume: impl FnOnce(usize, usize, Option<OwnedFd>) -> T,
     ) -> std::result::Result<(CaptureMeta, T), CaptureReadError> {
-        let buffer = self.dequeue_buffer()?;
+        let mut buffer = self.dequeue_buffer()?;
+        // Keep the newest raw frame when encoding lags the source. Encoded
+        // H.264 frames are never skipped here; only unencoded VIN buffers.
+        if self.bridge_kind == Some(CsiBridgeKind::Lt6911) {
+            for _ in 1..self.mappings.len() {
+                let next: V4l2Buffer = match ioctl::dqbuf(&self.fd, self.queue, MemoryType::Mmap) {
+                    Ok(next) => next,
+                    Err(error) => {
+                        let message = error.to_string();
+                        if error.into_errno() == Errno::EAGAIN as i32 {
+                            break;
+                        }
+                        let _ = self.queue_buffer(buffer.as_v4l2_buffer().index);
+                        return Err(io::Error::other(format!("latest frame dqbuf failed: {message}")).into());
+                    }
+                };
+                if let Err(error) = self.queue_buffer(buffer.as_v4l2_buffer().index) {
+                    let _ = self.queue_buffer(next.as_v4l2_buffer().index);
+                    return Err(io::Error::other(error.to_string()).into());
+                }
+                buffer = next;
+            }
+        }
         let index = buffer.as_v4l2_buffer().index as usize;
         let sequence = buffer.as_v4l2_buffer().sequence as u64;
         if index >= self.mappings.len() {
@@ -539,7 +598,8 @@ impl CaptureStream {
         }
         let expected = self.expected_capture_bytes();
         let mapped_size = self.mappings[index][0].len();
-        let native_hdmi = self.native_hdmirx_state.is_some();
+        let native_hdmi = self.native_hdmirx_state.is_some()
+            || self.bridge_kind == Some(CsiBridgeKind::Lt6911);
         let compressed = self.format == PixelFormat::Mjpeg;
         let lease = BufferReturn(Some(|| {
             self.queue_buffer(index as u32)
@@ -793,6 +853,20 @@ impl CaptureStream {
             .ok()
             .and_then(|timings| dv_timings_signature(&timings));
         expected.timings_match(observed_timings).unwrap_or(false)
+    }
+
+    fn lt6911_raw_geometry_changed(&self) -> bool {
+        // This vendor driver publishes QUERY_DV_TIMINGS only after stopping
+        // capture, but signal_debug exposes its latest meter sample while the
+        // old stream is still running.  A mismatch releases VIN so detection
+        // can settle and the next open can negotiate the new geometry.
+        let Some(path) = self.lt6911_signal_debug_path.as_ref() else {
+            return false;
+        };
+        let Ok(debug) = std::fs::read_to_string(path) else {
+            return false;
+        };
+        lt6911_raw_geometry(&debug).is_some_and(|current| current != self.resolution)
     }
 
     fn native_hdmirx_state_changed(&self) -> bool {
@@ -1151,8 +1225,19 @@ fn set_fps(fd: &File, queue: QueueType, fps: u32) -> std::result::Result<(), ioc
 
 #[cfg(test)]
 mod tests {
-    use super::{append_capture_plane, open_capture_device, DvTimingsSignature, NativeHdmirxState};
+    use super::{
+        append_capture_plane, lt6911_raw_geometry, open_capture_device, DvTimingsSignature,
+        NativeHdmirxState,
+    };
     use crate::video::format::PixelFormat;
+
+    #[test]
+    fn parses_lt6911_raw_geometry() {
+        let debug = "input_error=0 irqs=5 raw=1280x720 pixelclock=74497777\n";
+        let geometry = lt6911_raw_geometry(debug).unwrap();
+        assert_eq!((geometry.width, geometry.height), (1280, 720));
+        assert!(lt6911_raw_geometry("input_error=0 raw=bad").is_none());
+    }
 
     #[test]
     fn capture_planes_append_without_stale_bytes_or_reallocation() {

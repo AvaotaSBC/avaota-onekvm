@@ -328,6 +328,8 @@ fn build_webrtc(
 ) -> Arc<WebRtcStreamer> {
     let webrtc = WebRtcStreamer::with_config(WebRtcStreamerConfig {
         resolution,
+        output_resolution: (config.video.output_width != 0 && config.video.output_height != 0)
+            .then(|| Resolution::new(config.video.output_width, config.video.output_height)),
         input_format,
         fps: config.video.fps,
         bitrate_preset: config.stream.bitrate_preset,

@@ -99,6 +99,8 @@ export default {
 },
 
   videoInput: {
+    outputResolution: '编码输出分辨率（Cedar H.264）',
+    followInput: '跟随输入',
     format: '输入格式',
     resolution: '分辨率',
     frameRate: '帧率',

@@ -582,6 +582,8 @@ impl UniversalSession {
             let mut next_keyframe_retry = Instant::now() + KEYFRAME_RETRY_BASE_DELAY;
 
             let mut frames_sent: u64 = 0;
+            let mut send_time_us = 0u64;
+            let mut send_samples = 0u64;
 
             loop {
                 tokio::select! {
@@ -673,6 +675,7 @@ impl UniversalSession {
                             }
                         }
 
+                        let send_start = Instant::now();
                         let send_result = video_track
                             .write_frame_bytes_at(
                                 encoded_frame.data.clone(),
@@ -680,6 +683,15 @@ impl UniversalSession {
                                 Some(encoded_frame.pts_ms),
                             )
                             .await;
+                        send_time_us += send_start.elapsed().as_micros() as u64;
+                        send_samples += 1;
+                        if send_samples >= 600 {
+                            info!("WebRTC send latency: session={} mean={:.2} ms frames={}",
+                                session_id, send_time_us as f64 / send_samples as f64 / 1000.0,
+                                send_samples);
+                            send_time_us = 0;
+                            send_samples = 0;
+                        }
                         frame_rx.record_send(send_result.is_ok());
                         match send_result {
                             Ok(()) => {

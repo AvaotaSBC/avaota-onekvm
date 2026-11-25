@@ -625,6 +625,15 @@ impl VideoStreamManager {
     pub async fn list_devices(
         &self,
     ) -> crate::error::Result<Vec<crate::video::device::VideoDeviceInfo>> {
+        #[cfg(unix)]
+        if *self.mode.read().await == StreamMode::WebRTC
+            && self.webrtc_streamer.pipeline_stats().await.is_none()
+        {
+            // The MJPEG streamer's cached device describes the source mode at
+            // startup. Once WebRTC has released the exclusive VIN node, probe
+            // it again so the device list follows HDMI resolution changes.
+            return crate::video::device::enumerate_devices();
+        }
         self.streamer.list_devices().await
     }
 

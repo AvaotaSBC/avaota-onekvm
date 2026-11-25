@@ -1,9 +1,46 @@
-//! RKMPP-only capture/encode worker. Raw buffer ownership never crosses into a
+//! DMA capture/encode worker. Raw buffer ownership never crosses into a
 //! latest-frame slot or a network subscriber. Other encoders use shared.rs.
 use super::*;
 use crate::video::capture::status::capture_recovery_status;
 use crate::video::codec::registry::EncoderRegistry;
+use crate::video::codec::cedar::CedarDma;
 use hwcodec::rkmpp_dmabuf::{DmaEncoder, DmaEncoderConfig, DmaFormat};
+use std::os::fd::OwnedFd;
+
+pub(super) enum DmaHardwareEncoder {
+    Rkmpp(DmaEncoder),
+    Cedar(CedarDma),
+}
+
+impl DmaHardwareEncoder {
+    fn reconfigure(&mut self, bitrate_kbps: u32, gop: u32) -> Result<()> {
+        match self {
+            Self::Rkmpp(encoder) => encoder.reconfigure(bitrate_kbps, gop).map_err(AppError::VideoError),
+            Self::Cedar(encoder) => encoder.set_bitrate(bitrate_kbps),
+        }
+    }
+
+    fn encode(&mut self, index: usize, used: usize, fd: Option<OwnedFd>, pts: i64, keyframe: bool, codec: VideoEncoderType) -> Result<(Bytes, bool)> {
+        match self {
+            Self::Rkmpp(encoder) => {
+                let packet = unsafe { encoder.encode(index, used, fd, pts, keyframe) }
+                    .map_err(AppError::VideoError)?;
+                let data = Bytes::from(packet);
+                let key = match codec {
+                    VideoEncoderType::H264 => h264_bitstream::is_keyframe(&data),
+                    VideoEncoderType::H265 => h265_bitstream::is_keyframe(&data),
+                    _ => false,
+                };
+                Ok((data, key))
+            }
+            Self::Cedar(encoder) => encoder.encode(index, pts, keyframe),
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        match self { Self::Rkmpp(_) => "RKMPP", Self::Cedar(_) => "Cedar" }
+    }
+}
 
 pub(super) fn eligible(config: &SharedVideoPipelineConfig) -> bool {
     if std::env::var("ONE_KVM_RKMPP_DMABUF").as_deref() == Ok("0") {
@@ -22,7 +59,7 @@ pub(super) fn eligible(config: &SharedVideoPipelineConfig) -> bool {
         Some(backend) => registry.encoder_with_backend(config.output_codec, backend),
         None => registry.best_available_encoder(config.output_codec),
     };
-    rkmpp_dma_eligible(
+    hardware_dma_eligible(
         selected.map(|e| e.backend),
         config.output_codec,
         config.input_format,
@@ -32,10 +69,28 @@ pub(super) fn eligible(config: &SharedVideoPipelineConfig) -> bool {
 pub(super) fn prepare(
     stream: &CaptureStream,
     config: &SharedVideoPipelineConfig,
-) -> Result<DmaEncoder> {
+) -> Result<DmaHardwareEncoder> {
     let buffers = stream
         .export_dmabufs()
         .map_err(|e| AppError::VideoError(e.to_string()))?;
+    let selected = match config.encoder_backend {
+        Some(backend) => EncoderRegistry::global().encoder_with_backend(config.output_codec, backend),
+        None => EncoderRegistry::global().best_available_encoder(config.output_codec),
+    };
+    if selected.is_some_and(|encoder| encoder.backend == EncoderBackend::Cedar) {
+        return CedarDma::new(
+            config.output_codec == VideoEncoderType::H265,
+            config.resolution.width,
+            config.resolution.height,
+            config.output_resolution.unwrap_or(config.resolution).width,
+            config.output_resolution.unwrap_or(config.resolution).height,
+            stream.stride(),
+            config.fps,
+            config.bitrate_kbps(),
+            config.gop_size().max(1),
+            buffers,
+        ).map(DmaHardwareEncoder::Cedar);
+    }
     DmaEncoder::new(
         DmaEncoderConfig {
             width: config.resolution.width,
@@ -56,11 +111,12 @@ pub(super) fn prepare(
         },
         buffers,
     )
+    .map(DmaHardwareEncoder::Rkmpp)
     .map_err(AppError::VideoError)
 }
 
 enum CaptureEncoder {
-    Dma(DmaEncoder),
+    Dma(DmaHardwareEncoder),
     Copy(Box<EncoderThreadState>),
 }
 
@@ -86,7 +142,7 @@ impl Drop for Completion {
         self.0.clear_cmd_tx();
         let _ = self.0.encoder_done.send(true);
         let _ = self.0.running.send(false);
-        info!("RKMPP capture/encode worker stopped and device resources released");
+        info!("DMA capture/encode worker stopped and device resources released");
     }
 }
 
@@ -94,7 +150,7 @@ impl Drop for Completion {
 pub(super) fn start(
     pipeline: Arc<SharedVideoPipeline>,
     stream: CaptureStream,
-    encoder: DmaEncoder,
+    encoder: DmaHardwareEncoder,
     config: SharedVideoPipelineConfig,
     device: std::path::PathBuf,
     buffer_count: u32,
@@ -107,7 +163,8 @@ pub(super) fn start(
     let _ = pipeline.running.send(true);
     let worker = pipeline.clone();
     info!(
-        "RKMPP DMA candidate: device={} format={:?} resolution={:?} stride={}",
+        "{} DMA candidate: device={} format={:?} resolution={:?} stride={}",
+        encoder.name(),
         device.display(),
         stream.format(),
         stream.resolution(),
@@ -122,16 +179,16 @@ pub(super) fn start(
         .spawn(move || {
             let _completion = Completion(worker.clone());
             if let Err(error) = run(&worker, active, config, device, buffer_count, bridge, rx) {
-                error!("RKMPP DMA worker failed: {}", error);
+                error!("DMA worker failed: {}", error);
             }
         });
     if let Err(error) = result {
         drop(Completion(pipeline));
         return Err(AppError::VideoError(format!(
-            "Failed to start RKMPP DMA worker: {error}"
+            "Failed to start DMA worker: {error}"
         )));
     }
-    info!("RKMPP DMA capture path active: no CPU raw-frame copies (ONE_KVM_RKMPP_DMABUF=0 disables it)");
+    info!("DMA capture path active: no CPU raw-frame copies");
     Ok(())
 }
 
@@ -153,6 +210,11 @@ fn run(
     let buffer_pool = Arc::new(FrameBufferPool::new(2)); // allocated only on fallback
     let mut fps_frames = 0u32;
     let mut fps_start = Instant::now();
+    let mut stage_samples = 0u64;
+    let mut capture_wait_us = 0u64;
+    let mut encode_us = 0u64;
+    let mut publish_us = 0u64;
+    let mut stage_report = Instant::now();
     let errors = LogThrottler::with_secs(5);
 
     while pipeline.running_flag.load(Ordering::Acquire) {
@@ -272,69 +334,58 @@ fn run(
             }
             continue;
         }
-        let reservations = pipeline.reserve_outputs();
-        let result = if reservations.as_ref().is_none_or(Vec::is_empty) {
-            match capture.encoder.as_mut().expect("active encoder") {
-                CaptureEncoder::Dma(_) => capture
+        let mut reservations = None;
+        let dequeue_start = Instant::now();
+        let result = match capture.encoder.as_mut().expect("active encoder") {
+            CaptureEncoder::Dma(encoder) => {
+                let mut pts = 0;
+                capture
                     .stream
-                    .with_next_dmabuf(|_, _, _| ())
-                    .map(|_| Ok(Vec::new())),
-                CaptureEncoder::Copy(_) => {
-                    let mut raw = buffer_pool.take(0);
+                    .with_next_dmabuf(|index, bytes_used, fresh_fd| {
+                        let dequeued = Instant::now();
+                        // Reserve after DQBUF: waiting for the next raw frame gives
+                        // the WebRTC receiver time to release its one-slot queue.
+                        reservations = pipeline.reserve_outputs();
+                        if reservations.as_ref().is_none_or(Vec::is_empty) {
+                            return Ok(None);
+                        }
+                        pts = pipeline.pts_ms();
+                        let keyframe =
+                            pipeline.keyframe_requested.swap(false, Ordering::AcqRel);
+                        // Hold the dequeue lease until hardware encoding returns.
+                        let result = encoder.encode(index, bytes_used, fresh_fd, pts, keyframe, config.output_codec);
+                        capture_wait_us += dequeued.duration_since(dequeue_start).as_micros() as u64;
+                        encode_us += dequeued.elapsed().as_micros() as u64;
+                        stage_samples += 1;
+                        result.map(Some)
+                    })
+                    .map(|(_, packet)| {
+                        if reservations.as_ref().is_none_or(Vec::is_empty) {
+                            return Ok(Vec::new());
+                        }
+                        packet.map(|maybe| maybe.map_or_else(Vec::new, |(data, is_keyframe)| {
+                            let (data, is_keyframe) = pipeline.inspect_and_parameterize_packet(
+                                config.output_codec, data, is_keyframe,
+                            );
+                            vec![EncodedVideoFrame {
+                                data,
+                                pts_ms: pts,
+                                is_keyframe,
+                                sequence: pipeline.sequence.fetch_add(1, Ordering::Relaxed) + 1,
+                                duration: Duration::from_micros(1_000_000 / config.fps.max(1) as u64),
+                                codec: config.output_codec,
+                            }]
+                        }))
+                    })
+            }
+            CaptureEncoder::Copy(encoder) => {
+                reservations = pipeline.reserve_outputs();
+                let mut raw = buffer_pool.take(0);
+                if reservations.as_ref().is_none_or(Vec::is_empty) {
                     let result = capture.stream.next_into(&mut raw).map(|_| Ok(Vec::new()));
                     buffer_pool.put(raw);
                     result
-                }
-            }
-        } else {
-            match capture.encoder.as_mut().expect("active encoder") {
-                CaptureEncoder::Dma(encoder) => {
-                    let pts = pipeline.pts_ms();
-                    capture
-                        .stream
-                        .with_next_dmabuf(|index, bytes_used, fresh_fd| {
-                            let keyframe =
-                                pipeline.keyframe_requested.swap(false, Ordering::AcqRel);
-                            // The callback holds the dequeue lease until native encode
-                            // completes (or destroys MPP on error), before QBUF.
-                            unsafe { encoder.encode(index, bytes_used, fresh_fd, pts, keyframe) }
-                        })
-                        .map(|(_, packet)| {
-                            packet
-                                .map(|packet| {
-                                    let data = Bytes::from(packet);
-                                    let is_keyframe = match config.output_codec {
-                                        VideoEncoderType::H264 => {
-                                            h264_bitstream::is_keyframe(&data)
-                                        }
-                                        VideoEncoderType::H265 => {
-                                            h265_bitstream::is_keyframe(&data)
-                                        }
-                                        _ => false,
-                                    };
-                                    let (data, is_keyframe) = pipeline
-                                        .inspect_and_parameterize_packet(
-                                            config.output_codec,
-                                            data,
-                                            is_keyframe,
-                                        );
-                                    vec![EncodedVideoFrame {
-                                        data,
-                                        pts_ms: pts,
-                                        is_keyframe,
-                                        sequence: pipeline.sequence.fetch_add(1, Ordering::Relaxed)
-                                            + 1,
-                                        duration: Duration::from_micros(
-                                            1_000_000 / config.fps.max(1) as u64,
-                                        ),
-                                        codec: config.output_codec,
-                                    }]
-                                })
-                                .map_err(AppError::VideoError)
-                        })
-                }
-                CaptureEncoder::Copy(encoder) => {
-                    let mut raw = buffer_pool.take(0);
+                } else {
                     capture.stream.next_into(&mut raw).map(|meta| {
                         let frame = VideoFrame::from_pooled(
                             Arc::new(FrameBuffer::new(raw, Some(buffer_pool.clone()))),
@@ -358,10 +409,12 @@ fn run(
                     config.fps,
                 ));
                 fps_frames += frames.len() as u32;
+                let publish_start = Instant::now();
                 pipeline.broadcast_encoded_batch(
                     frames.into_iter().map(Arc::new).collect::<Vec<_>>().into(),
                     reservations.unwrap_or_default(),
                 );
+                publish_us += publish_start.elapsed().as_micros() as u64;
             }
             Ok(Err(error)) => {
                 if matches!(capture.encoder, Some(CaptureEncoder::Dma(_))) {
@@ -421,6 +474,20 @@ fn run(
                 fps_frames as f32 / fps_start.elapsed().as_secs_f32();
             fps_frames = 0;
             fps_start = Instant::now();
+        }
+        if stage_report.elapsed() >= Duration::from_secs(10) {
+            if stage_samples > 0 {
+                info!("DMA latency stages: capture_wait={:.2} ms encode={:.2} ms publish={:.2} ms samples={}",
+                    capture_wait_us as f64 / stage_samples as f64 / 1000.0,
+                    encode_us as f64 / stage_samples as f64 / 1000.0,
+                    publish_us as f64 / stage_samples as f64 / 1000.0,
+                    stage_samples);
+            }
+            stage_samples = 0;
+            capture_wait_us = 0;
+            encode_us = 0;
+            publish_us = 0;
+            stage_report = Instant::now();
         }
     }
     // Explicitly release in the worker before Completion publishes stopped.

@@ -28,6 +28,7 @@ pub enum CsiBridgeKind {
     Rk628,
     RkHdmirx,
     Tc358743,
+    Lt6911,
     Unknown,
 }
 
@@ -40,6 +41,8 @@ impl CsiBridgeKind {
             Some(Self::RkHdmirx)
         } else if lower.contains("tc358743") || lower.contains("tc358746") {
             Some(Self::Tc358743)
+        } else if lower.contains("lt6911") {
+            Some(Self::Lt6911)
         } else {
             None
         }
@@ -472,6 +475,20 @@ fn connected_bridge_entity<'a>(
             }
         }
     }
+    // The sunxi VIN media graph leaves the LT6911 -> MIPI links disabled even
+    // while that input is selected.  Pair it only when this VIN graph has one
+    // LT6911 subdev, avoiding a global /dev/v4l-subdev scan.
+    if start.name.starts_with("vin_video") {
+        let mut lt6911 = entities
+            .iter()
+            .filter(|entity| entity.name.to_ascii_lowercase().contains("lt6911"))
+            .filter(|entity| entity.major != 0 || entity.minor != 0);
+        if let Some(entity) = lt6911.next() {
+            if lt6911.next().is_none() {
+                return Some((entity, CsiBridgeKind::Lt6911));
+            }
+        }
+    }
     None
 }
 
@@ -775,6 +792,23 @@ mod tests {
         let links = vec![graph_link(20, 1), graph_link(20, 63)];
 
         assert!(connected_bridge_entity(&entities, &links, (81, 0)).is_none());
+    }
+
+    #[test]
+    fn sunxi_vin_finds_unique_lt6911_with_unflagged_sensor_link() {
+        let entities = vec![
+            graph_entity(1, "vin_video0", (81, 0)),
+            graph_entity(2, "vin_cap.0", (81, 1)),
+            graph_entity(3, "lt6911c_mipi", (81, 2)),
+        ];
+        let links = vec![graph_link(2, 1)];
+        let (entity, kind) = connected_bridge_entity(&entities, &links, (81, 0)).unwrap();
+        assert_eq!(entity.id, 3);
+        assert_eq!(kind, CsiBridgeKind::Lt6911);
+
+        let mut ambiguous = entities;
+        ambiguous.push(graph_entity(4, "lt6911c_mipi 4-002b", (81, 3)));
+        assert!(connected_bridge_entity(&ambiguous, &links, (81, 0)).is_none());
     }
 
     #[test]

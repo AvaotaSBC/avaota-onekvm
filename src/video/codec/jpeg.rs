@@ -22,6 +22,7 @@ use crate::video::format::{PixelFormat, Resolution};
 pub struct JpegEncoder {
     config: EncoderConfig,
     compressor: turbojpeg::Compressor,
+    cedar: Option<super::cedar::CedarH264>,
     /// I420 buffer for YUV encoding (Y + U + V planes)
     i420_buffer: Vec<u8>,
     /// Scratch buffer for split chroma planes when converting semiplanar 4:2:2 / 4:4:4 input.
@@ -42,6 +43,19 @@ impl JpegEncoder {
             .map_err(|e| AppError::VideoError(format!("Failed to set JPEG quality: {}", e)))?;
 
         Ok(Self {
+            cedar: if super::cedar::jpeg_available() {
+                match super::cedar::CedarH264::new_jpeg(config.resolution.width,
+                    config.resolution.height, config.quality) {
+                    Ok(encoder) => {
+                        tracing::info!("Sun55i Cedar JPEG encoder active");
+                        Some(encoder)
+                    }
+                    Err(error) => {
+                        tracing::warn!("Cedar JPEG unavailable: {}", error);
+                        None
+                    }
+                }
+            } else { None },
             config,
             compressor,
             i420_buffer: Vec::new(),
@@ -68,6 +82,10 @@ impl JpegEncoder {
             .set_quality(quality.min(100) as i32)
             .map_err(|e| AppError::VideoError(format!("Failed to set JPEG quality: {}", e)))?;
         self.config.quality = quality;
+        if self.cedar.is_some() {
+            self.cedar = super::cedar::CedarH264::new_jpeg(self.config.resolution.width,
+                self.config.resolution.height, quality).ok();
+        }
         Ok(())
     }
 
@@ -189,6 +207,15 @@ impl JpegEncoder {
 
     /// Encode NV12 frame to JPEG
     pub fn encode_nv12(&mut self, data: &[u8], sequence: u64) -> Result<EncodedFrame> {
+        if let Some(cedar) = self.cedar.as_mut() {
+            match cedar.encode(data, sequence as i64) {
+                Ok((jpeg, _)) => return Ok(EncodedFrame::jpeg(jpeg, self.config.resolution, sequence)),
+                Err(error) => {
+                    tracing::warn!("Cedar JPEG failed, using TurboJPEG: {}", error);
+                    self.cedar = None;
+                }
+            }
+        }
         let width = self.config.resolution.width as usize;
         let height = self.config.resolution.height as usize;
         let expected_size = width * height * 3 / 2;

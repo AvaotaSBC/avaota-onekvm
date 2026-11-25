@@ -45,6 +45,8 @@ pub struct VideoConfigUpdate {
     pub format: Option<String>,
     pub width: Option<u32>,
     pub height: Option<u32>,
+    pub output_width: Option<u32>,
+    pub output_height: Option<u32>,
     pub fps: Option<u32>,
     pub quality: Option<u32>,
 }
@@ -67,6 +69,16 @@ impl VideoConfigUpdate {
     }
 
     pub fn validate(&self) -> crate::error::Result<()> {
+        if let (Some(width), Some(height)) = (self.output_width, self.output_height) {
+            if (width != 0 || height != 0)
+                && (!(320..=4096).contains(&width) || !(240..=4096).contains(&height)
+                    || width % 2 != 0 || height % 2 != 0)
+            {
+                return Err(AppError::BadRequest("Invalid output resolution".into()));
+            }
+        } else if self.output_width.is_some() || self.output_height.is_some() {
+            return Err(AppError::BadRequest("Output width and height must be set together".into()));
+        }
         if let Some(width) = self.width {
             if !(320..=7680).contains(&width) {
                 return Err(AppError::BadRequest(
@@ -109,6 +121,12 @@ impl VideoConfigUpdate {
         if let Some(height) = self.height {
             config.height = height;
         }
+        if let Some(width) = self.output_width {
+            config.output_width = width;
+        }
+        if let Some(height) = self.output_height {
+            config.output_height = height;
+        }
         if let Some(fps) = self.fps {
             config.fps = fps;
         }
@@ -129,6 +147,8 @@ mod video_config_update_tests {
             format: Some("MJPEG".to_string()),
             width: Some(7680),
             height: Some(4320),
+            output_width: None,
+            output_height: None,
             fps: Some(120),
             quality: Some(90),
         };

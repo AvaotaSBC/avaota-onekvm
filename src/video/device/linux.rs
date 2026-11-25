@@ -261,7 +261,9 @@ impl VideoDevice {
                 let fps = mode.fps.or_else(|| self.current_parm_fps());
                 let hdmi_mode = Some((mode.width, mode.height, fps));
                 let status = VideoInputStatus::locked_with_optional_fps(
-                    self.current_active_format(),
+                    self.current_active_format().or_else(|| {
+                        (caps.driver == "sunxi-vin").then_some(PixelFormat::Nv12)
+                    }),
                     mode.width,
                     mode.height,
                     fps,
@@ -317,9 +319,9 @@ impl VideoDevice {
             // so we treat the HDMI source mode as the single allowed
             // resolution for every pixel format.
             // Sunxi VIN enumerates formats which its active CSI pipeline
-            // rejects in TRY_FMT. Probe the current G_FMT only, avoiding
-            // warnings and duplicate choices in the device list.
-            self.enumerate_bridge_formats(subdev_hdmi_mode, native_hdmirx || sunxi_vin)?
+            // rejects in TRY_FMT. Keep its NV12 path even when the initial
+            // G_FMT is empty, without probing unsupported formats.
+            self.enumerate_bridge_formats(subdev_hdmi_mode, native_hdmirx, sunxi_vin)?
         } else {
             self.enumerate_formats()?
         };
@@ -424,6 +426,7 @@ impl VideoDevice {
         &self,
         subdev_hdmi_mode: Option<(u32, u32, Option<f64>)>,
         current_format_only: bool,
+        sunxi_vin: bool,
     ) -> Result<Vec<FormatInfo>> {
         let queue = self.capture_queue_type()?;
         let current_fmt = self.get_format().ok();
@@ -476,6 +479,13 @@ impl VideoDevice {
                 );
                 continue;
             };
+
+            // The vendor VIN enumerates many formats that the attached CSI
+            // bridge cannot deliver. NV12 is the supported capture path on
+            // this board, including before its initially empty G_FMT is set.
+            if sunxi_vin && format != PixelFormat::Nv12 {
+                continue;
+            }
 
             // Native RK3588 HDMI RX does not perform pixel-format conversion.
             // ENUM_FMT reports every input encoding the controller can receive,
@@ -1343,6 +1353,7 @@ pub(crate) fn parse_bridge_kind(kind: Option<&str>) -> Option<csi_bridge::CsiBri
         "rk628" => csi_bridge::CsiBridgeKind::Rk628,
         "rkhdmirx" => csi_bridge::CsiBridgeKind::RkHdmirx,
         "tc358743" => csi_bridge::CsiBridgeKind::Tc358743,
+        "lt6911" => csi_bridge::CsiBridgeKind::Lt6911,
         "unknown" => csi_bridge::CsiBridgeKind::Unknown,
         _ => return None,
     })

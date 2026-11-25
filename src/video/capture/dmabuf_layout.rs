@@ -30,6 +30,13 @@ impl DmaCaptureLayout<'_> {
                 b"BGR3" => self.width.checked_mul(3)?,
                 _ => return None,
             }
+        } else if !self.single_planar
+            && self.driver == "sunxi-vin"
+            && self.bus_info.starts_with("platform:")
+            && self.fourcc == *b"NV12"
+            && self.stride == self.width
+        {
+            self.width
         } else if self.configurable_usb
             && self.single_planar
             && self.driver == "uvcvideo"
@@ -90,6 +97,20 @@ mod tests {
             height: 1080,
             stride: 3840,
         }
+    }
+
+    #[test]
+    fn sunxi_vin_nv12_accepts_tight_stride() {
+        let mut layout = usb();
+        layout.driver = "sunxi-vin";
+        layout.bus_info = "platform:5800800.vind";
+        layout.configurable_usb = false;
+        layout.single_planar = false;
+        layout.fourcc = *b"NV12";
+        layout.stride = 1920;
+        assert_eq!(layout.minimum_bytes(), Some(3_110_400));
+        layout.stride = 2880;
+        assert_eq!(layout.minimum_bytes(), None);
     }
 
     #[test]

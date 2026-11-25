@@ -12,6 +12,8 @@ export interface VideoConfig {
 	format?: string;
 	width: number;
 	height: number;
+	output_width: number;
+	output_height: number;
 	fps: number;
 	quality: number;
 }
@@ -700,6 +702,8 @@ export interface VideoConfigUpdate {
 	format?: string;
 	width?: number;
 	height?: number;
+	output_width?: number;
+	output_height?: number;
 	fps?: number;
 	quality?: number;
 }
